@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project state
 
-Argus is a personal portfolio-intelligence system (digest + trade journal + quant + fundamental-analysis dossiers) for a single user, Omar. **Phase 0 is underway** — the repo holds the two specification documents, a `PHASE0-TODO.md` checklist, the applied Supabase schema migration (`supabase/migrations/`), and a scaffolded Python monorepo (`ingestion/ digest/ journal/ bot/ quant/ shared/`) whose packages are still empty `__init__.py` placeholders. No application code is written yet. The specs are the source of truth; build from them.
+Argus is a personal portfolio-intelligence system (digest + trade journal + quant + fundamental-analysis dossiers) for a single user, Omar. **Phase 0 is underway** — the repo holds the two specification documents, a `PHASE0-TODO.md` checklist, the applied Supabase schema migration (`supabase/migrations/`), and a scaffolded Python monorepo (`ingestion/ digest/ journal/ bot/ quant/ shared/`) whose package `__init__.py` files hold only a one-line docstring — no application code is written yet. The specs are the source of truth; build from them.
 
 - `argus-blueprint.md` (v2.0, FINAL) — master spec. The single source of truth for everything in Phases 0–4.
 - `argus-analyst-module.md` (v1.0) — the Phase 5 fundamental-analysis module. Independently buildable; built **after** the MVP.
@@ -67,7 +67,7 @@ Phases (blueprint §10): **0 Spine** → **1 Digest + Bot** → **2 Journal** �
 
 Python throughout (Vercel Python serverless + GitHub Actions Python jobs). `pandas_ta` for indicators. Claude API: **Haiku** for sentiment scoring (behind a swappable `score_headlines()` interface) and **Sonnet** for synthesis. Supabase Postgres for state.
 
-Intended monorepo layout (blueprint §2 item 14) — **none of this exists yet**: `ingestion/ digest/ journal/ bot/ quant/ shared/ .github/workflows/`.
+Monorepo layout (blueprint §2 item 14) — **scaffolded, nothing implemented yet**: the packages `ingestion/ digest/ journal/ bot/ quant/ shared/` each exist with a docstring-only `__init__.py`, and `.github/workflows/` holds a `.gitkeep` placeholder (workflows arrive in Phase 1).
 
 ## Commands
 
