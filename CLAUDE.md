@@ -4,14 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project state
 
-Argus is a personal portfolio-intelligence system (digest + trade journal + quant + fundamental-analysis dossiers) for a single user, Omar. **The repo is currently greenfield** — it contains only two specification documents and no code. The specs are the source of truth; build from them.
+Argus is a personal portfolio-intelligence system (digest + trade journal + quant + fundamental-analysis dossiers) for a single user, Omar. **Phase 0 is underway** — the repo holds the two specification documents, a `PHASE0-TODO.md` checklist, the applied Supabase schema migration (`supabase/migrations/`), and a scaffolded Python monorepo (`ingestion/ digest/ journal/ bot/ quant/ shared/`) whose packages are still empty `__init__.py` placeholders. No application code is written yet. The specs are the source of truth; build from them.
 
 - `argus-blueprint.md` (v2.0, FINAL) — master spec. The single source of truth for everything in Phases 0–4.
 - `argus-analyst-module.md` (v1.0) — the Phase 5 fundamental-analysis module. Independently buildable; built **after** the MVP.
 
-Phase 0 (the spine) is the next thing to build. See **Build phases** below.
-
-> ⚠️ **Repo setup gotcha:** the git root is currently `C:/Users/Omar` (the whole home directory) — there is no `.git` inside the project folder and no commits yet. Phase 0's "create argus repo" step must `git init` *inside* the project folder before committing, or every commit will try to track the entire home directory.
+Phase 0 (the spine) is in progress: the Supabase project exists and the §4 schema migration is applied to the live DB (all 16 tables), but ingestion is not yet built. See **Build phases** below.
 
 ## Non-negotiable invariants (the 8 Operating Laws, as code rules)
 
@@ -73,7 +71,7 @@ Intended monorepo layout (blueprint §2 item 14) — **none of this exists yet**
 
 ## Commands
 
-- **No build/lint/test toolchain exists yet** — the repo contains only spec docs. Populate this section once the Python tooling (package manager, test runner) is chosen during Phase 0.
+- **No build/lint/test toolchain exists yet.** Populate this section once the Python tooling (package manager, test runner) is chosen during Phase 0.
 - **Domain CLI (spec'd, not yet implemented):** `seed-calendar --year YYYY` — guided annual seeding of FOMC/CPI/NFP dates.
 - **Telegram commands:** `/pulse` `/book` `/journal` `/skip` `/health` `/override` (and `/analyze` in Phase 5).
 
