@@ -1,6 +1,6 @@
 # ARGUS — Master Blueprint v2.0 (FINAL, post-grill)
 
-**Owner:** Omar · **Updated:** 2026-06-12 (SPCX listing day) · **Status:** All 15 grill items resolved. Build-ready.
+**Owner:** Omar · **Updated:** 2026-06-13 (added §5 Retention Policy; SPCX listed 2026-06-12) · **Status:** All 15 grill items resolved. Build-ready.
 **Supersedes:** portfolio-intelligence-blueprint.md (v1.0). This document is the single source of truth.
 **Name:** Argus — the hundred-eyed watcher of Greek myth; some eyes always open. Repo: `argus`.
 
@@ -49,7 +49,7 @@ Omar (Data Engineer, Amman; Python/Power BI; has shipped MacrosTracker Telegram 
 | 12 | Reliability | 30s timeout/call; 2 retries 30s apart then mark unavailable + footer line; staleness flags (prices >2 trading days, Flex >48h → warn in digest); critical push alerts (Flex fails 2 days = journal blind; Monday digest total failure). **Monday digest: auto-retry once at +1h, then fail loud** |
 | 13 | Secrets | 9 secrets. Never in repo. GH Actions repo secrets (all); Vercel env vars (Telegram token, Supabase, workflow-dispatch-scoped GitHub PAT only); local `.env` gitignored. Flex token: read-only by design, 1-yr expiry, **/health shows days-to-expiry** |
 | 14 | Name & structure | **Argus**, monorepo: `ingestion/ digest/ journal/ bot/ quant/ shared/ .github/workflows/` |
-| 15 | SPCX calendar | Seeded below (§14). Staggered lockup, not standard 180d. Conditional-unlock monitor: Argus auto-watches the +10% trigger (close ≥ $175.50 on ≥5 of 10 sessions post-Q2-earnings) |
+| 15 | SPCX calendar | Seeded below (§15). Staggered lockup, not standard 180d. Conditional-unlock monitor: Argus auto-watches the +10% trigger (close ≥ $175.50 on ≥5 of 10 sessions post-Q2-earnings) |
 
 ---
 
@@ -105,7 +105,58 @@ Round-trip classifier: same-day sell of qty ≥ 0.8 × sleeve_shares followed by
 
 ---
 
-## 5. Ingestion Sources (final)
+## 5. Retention Policy (config-driven defaults)
+
+**Principle.** Tables split into two classes: *durable* (financial truth + the distilled
+product — kept forever, negligible storage) and *ephemeral* (raw inputs already distilled
+into digests — pruned by age). At realistic volume (~40–100 MB/year worst case against the
+500 MB free-tier cap), free tier is a permanent home, not a phase — provided the ephemeral
+tables are bounded. (Law 3.)
+
+**Hard rule — trades are permanent.** round_trips, transactions, contributions,
+positions_snapshot, and trade_annotations are NEVER deleted. The journal verdict (Law 6)
+and the trade-10/20/50 checkpoints evaluate *cumulative* sleeve-only Δshares from trade #1
+onward; at ~1–2 round trips/week, trade 50 lands ~6–12 months in, so any age-based purge
+would erase the early trades the permanent-stop checkpoint depends on. Also required intact
+for any future backtest. This is a rule, not a tunable default.
+
+**News is pruned by age, not importance.** Importance is never judged at deletion time.
+Each weekly digest is the durable, distilled memory of what mattered; once a digest is
+written, the raw headlines it drew from are disposable input. Digests are kept forever
+(~0.5 MB/yr).
+
+**Window vs. cadence.** The retention *window* (how old before a row is eligible for
+deletion) is the decision that matters and is stored per-table as a config row (JSONB →
+changeable with no migration). The cleanup *cadence* (sweep frequency) is not load-bearing
+at this volume — a monthly automated sweep is the default; even a yearly sweep stays under
+the cap.
+
+**Table map (defaults — every window editable via config):**
+
+Keep forever: instruments, prices_eod, indicators, macro_series, calendar_events, digests,
+positions_snapshot, transactions, contributions, round_trips, trade_annotations, config.
+(indicators is regenerable from prices_eod if reclamation is ever wanted.)
+
+Prunable (default window):
+- headlines — 180 days
+- sentiment — pruned in lockstep with its parent headline
+- fetch_log — 90 days
+- skip_log — 90 days
+
+**Implementation notes (DEFERRED — do not build in Phase 0):**
+- Pruning is a future-phase scheduled job (DELETE ... WHERE <timestamp> < now() - window).
+  There is no data to prune yet.
+- sentiment references headlines; deletion must handle dependents (delete children first or
+  ON DELETE CASCADE) — not a naive single-table DELETE.
+- Windows live as config rows; the cleanup job reads them at runtime.
+- Postgres reclaims deleted space via autovacuum (Supabase-managed), not instantly on DELETE.
+
+Laws engaged: 3 (free-tier-only — math shows it's permanent), 6 (journal-is-verdict — trades
+immutable), 8 (boring-beats-clever — age-based DELETE over importance-classification).
+
+---
+
+## 6. Ingestion Sources (final)
 
 | Layer | Source | Cadence | Notes |
 |---|---|---|---|
@@ -121,11 +172,11 @@ Round-trip classifier: same-day sell of qty ≥ 0.8 × sleeve_shares followed by
 | Portfolio | IBKR Flex Web Service | Daily 20:30 UTC weekdays | 4+1 sections per §2 item 4; token read-only, 1-yr expiry |
 | Fallback prices | yfinance | On Tiingo failure | Unofficial; fallback role only |
 
-Dedup = URL match only. Reliability rules per §12 of decisions table apply to every source.
+Dedup = URL match only. Reliability rules per §2 item 12 apply to every source.
 
 ---
 
-## 6. Digest Engine (final spec)
+## 7. Digest Engine (final spec)
 
 **Format:** analyst note, 600–800 words, 5 fixed sections, readable in 2–3 minutes on phone:
 1. **Regime** — SPY/QQQ vs 50/200-day, VIX level + percentile, 10Y + weekly change, days to next FOMC. One paragraph: what kind of market is this.
@@ -140,7 +191,7 @@ Dedup = URL match only. Reliability rules per §12 of decisions table apply to e
 
 ---
 
-## 7. Trading Protocol (FINAL — all parameters locked)
+## 8. Trading Protocol (FINAL — all parameters locked)
 
 *Not re-litigated. DCA and sleeve run simultaneously on separate tracks; never compared to each other.*
 
@@ -156,7 +207,7 @@ Dedup = URL match only. Reliability rules per §12 of decisions table apply to e
 
 ---
 
-## 8. Journal & Checkpoints (the verdict — Law 6)
+## 9. Journal & Checkpoints (the verdict — Law 6)
 
 **Core metric: sleeve-only Δshares.** DCA contributions go to core by Law 5, so sleeve share-count changes are 100% trade-attributable. Win example: sell 17 @ 405, rebuy @ 403.50 → ~17.05 sh (+0.06). Loss: rebuy @ 406.50 → ~16.94 (−0.06). Direction-neutral, contribution-proof, goal-aligned (more shares = winning).
 
@@ -172,13 +223,13 @@ Telegram pushes proximity warnings: "Trade 18 of 20 — checkpoint in 2. Sleeve 
 
 ---
 
-## 9. Quant Modules (Phase 3, unchanged)
+## 10. Quant Modules (Phase 3, unchanged)
 
 DCA Monte Carlo to $100K with confidence bands (contributions from observed history, never assumed); drawdown-conviction view; risk view with factor-concentration honesty (TSLA+SPCX ≈ one factor). SPCX joins simulations as history accrues.
 
 ---
 
-## 10. Build Phases
+## 11. Build Phases
 
 | Phase | Scope | Est. |
 |---|---|---|
@@ -190,19 +241,19 @@ DCA Monte Carlo to $100K with confidence bands (contributions from observed hist
 
 **Hard rule: Phase 2 ships before round-trip #1.** MVP (0–2) ≈ 29–40 h. IBKR portal setup (Flex query + token) happens at Phase 0 build time.
 
-## 11. Cost Model
+## 12. Cost Model
 
 Data $0 · Hosting $0 (Vercel + GH Actions + Supabase free tiers; Render eliminated; no keep-alive services) · Claude API ≈ $1–2/month (Sonnet digest ~$0.07–0.15/run, Haiku scoring ~$0.01–0.03/run, 6–10 runs/mo). **Total ≈ $1–2/month.**
 
 ---
 
-## 12–13. Reliability & Secrets
+## 13–14. Reliability & Secrets
 
 Per decisions table items 12–13: 30s timeouts, 2 retries, staleness flags, footer health line, critical push alerts, Monday auto-retry-once-then-fail-loud; secrets in platform-native stores only, least-privilege scoping, Flex token expiry surfaced in /health.
 
 ---
 
-## 14. SPCX Calendar Seed (insert into calendar_events at Phase 0)
+## 15. SPCX Calendar Seed (insert into calendar_events at Phase 0)
 
 IPO: 2026-06-12, $135/share, Nasdaq. Staggered lockup per S-1 (insiders sold nothing in the offering itself; Musk + select major backers excluded from all early release — full 366 days).
 
@@ -225,6 +276,6 @@ TBD rows auto-resolve via Finnhub once SpaceX files its 8-K earnings announcemen
 
 ---
 
-## 15. Next Action
+## 16. Next Action
 
 Phase 0 with Claude Code: create `argus` repo (structure per §2 item 14) → Supabase project + schema DDL from §4 → Tiingo key + historical seed → FRED key + series pull → IBKR Flex query + token setup → fetch_log + wrapped fetchers. Then Phase 1.
