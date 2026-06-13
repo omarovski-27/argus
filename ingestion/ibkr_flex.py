@@ -31,7 +31,7 @@ sell->rebuy *pairing* into ``round_trips`` is Phase 2 (journal), not done here.
 DEFERRED (PHASE0-TODO.md; not in the §4 schema, so out of scope for these 6 files):
   • transactions.ext_id + unique(ext_id): without it, re-running a Flex pull that
     re-covers a window re-inserts duplicate transactions/positions/contributions.
-    These writes are plain inserts (not idempotent) until ext_id lands. Run once/day.
+    ext_id is now implemented (Trades->ibExecID, cash->transactionID); writes upsert idempotently.
   • contributions.currency: Flex amounts are assumed to be in the account base
     currency (USD). JD<->USD normalization is deferred.
 
@@ -275,7 +275,9 @@ def _store_positions(statement: ET.Element, run_id: str, known: set[str]) -> boo
                 }
             )
         if rows:
-            get_client().table("positions_snapshot").insert(rows).execute()
+            get_client().table("positions_snapshot").upsert(
+                rows, on_conflict="date,symbol", ignore_duplicates=True
+            ).execute()
         if skipped:
             print(f"[ibkr_flex] positions: skipped untracked symbol(s): {sorted(skipped)}")
         if undated:
@@ -309,6 +311,7 @@ def _store_trades(
             commission = _num(trade.get("ibCommission"))
             rows.append(
                 {
+                    "ext_id": trade.get("ibExecID"),
                     "exec_time": _flex_datetime(trade.get("dateTime")),
                     "symbol": symbol,
                     "side": side,
@@ -321,7 +324,9 @@ def _store_trades(
                 }
             )
         if rows:
-            get_client().table("transactions").insert(rows).execute()
+            get_client().table("transactions").upsert(
+                rows, on_conflict="ext_id", ignore_duplicates=True
+            ).execute()
         if skipped:
             print(f"[ibkr_flex] trades: skipped untracked symbol(s): {sorted(skipped)}")
         write_fetch_log("ibkr_flex:trades", run_id, "success", _elapsed_ms(start))
@@ -353,9 +358,11 @@ def _store_cash(statement: ET.Element, run_id: str) -> bool:
                 # than letting the batch insert fail and blind the whole section.
                 undated += 1
                 continue
-            rows.append({"date": row_date, "amount": amount})
+            rows.append({"ext_id": cash.get("transactionID"), "date": row_date, "amount": amount})
         if rows:
-            get_client().table("contributions").insert(rows).execute()
+            get_client().table("contributions").upsert(
+                rows, on_conflict="ext_id", ignore_duplicates=True
+            ).execute()
         if undated:
             print(f"[ibkr_flex] cash: skipped {undated} deposit(s) with unresolved date.")
         write_fetch_log("ibkr_flex:cash", run_id, "success", _elapsed_ms(start))
