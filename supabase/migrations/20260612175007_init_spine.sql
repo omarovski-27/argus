@@ -428,7 +428,8 @@ comment on column config.value is
 -- the anon/authenticated (PostgREST) roles can read/write NOTHING. Argus is
 -- accessed exclusively server-side via the Supabase SERVICE_ROLE key (which
 -- BYPASSES RLS) from GitHub Actions and Vercel. No browser client exists, so this
--- hard-denies the public PostgREST endpoint while trusted backends are unaffected.
+-- hard-denies the public PostgREST endpoint. service_role bypasses RLS but still needs
+-- explicit table GRANTs (RLS-bypass alone does NOT grant privileges) — see GRANTS below.
 -- =============================================================================
 alter table instruments         enable row level security;
 alter table prices_eod          enable row level security;
@@ -447,3 +448,25 @@ alter table skip_log            enable row level security;
 alter table fetch_log           enable row level security;
 alter table config              enable row level security;
 -- END — 16 tables, dependency-ordered.
+
+
+-- =============================================================================
+-- GRANTS  —  service_role is the only role Argus uses
+--
+-- RLS (above) is bypassed for service_role, but PostgREST checks table-level
+-- privileges FIRST, so service_role must be granted them explicitly or every
+-- backend call fails with 42501 "permission denied for table ...". anon and
+-- authenticated are granted NOTHING on purpose: no grants + RLS = the public lock.
+--
+-- Direct table GRANT only. Do NOT add "... ON ALL SEQUENCES" or ALTER DEFAULT
+-- PRIVILEGES here: surrogate PKs are GENERATED ALWAYS AS IDENTITY, whose sequences
+-- advance under the table's INSERT privilege (no sequence grant needed). A sequence
+-- or default-privileges statement that errors silently ROLLS BACK this whole block
+-- in the SQL Editor's implicit transaction — which is exactly what bit us the first
+-- time: the table grant looked applied but had been rolled back. Verified working —
+-- service_role insert/read/delete succeed; anon stays 401 at the grant layer.
+-- Idempotent; run as the table owner (the Supabase SQL Editor runs as postgres).
+-- =============================================================================
+grant usage on schema public to service_role;
+grant select, insert, update, delete on all tables in schema public to service_role;
+-- anon / authenticated: NO grants (intentional — keeps the public PostgREST lock).
