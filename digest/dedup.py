@@ -37,7 +37,9 @@ def _read_all(table: str, column: str, *, method: str | None = None) -> list[dic
     rows: list[dict] = []
     start = 0
     while True:
-        query = client.table(table).select(column)
+        # .order("id") on the unique PK gives a stable total order across .range() pages,
+        # so no boundary row is skipped or repeated once a table exceeds 1000 rows (Law 7).
+        query = client.table(table).select(column).order("id")
         if method is not None:
             query = query.eq("method", method)
         batch = query.range(start, start + _PAGE - 1).execute().data or []

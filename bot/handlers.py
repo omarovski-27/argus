@@ -67,6 +67,14 @@ def _utc_today() -> date:
     return datetime.now(timezone.utc).date()
 
 
+def _to_float(value: object) -> float | None:
+    """Coerce a numeric cell (PostgREST may return numeric as str) to float, else None."""
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
 def _money(value: float | None) -> str:
     """Format a USD amount as ``$1,234.56``; None → ``n/a`` (Law 2: absence is shown)."""
     return "n/a" if value is None else f"${value:,.2f}"
@@ -173,9 +181,9 @@ def handle_book(message: dict) -> str:
         .data
     )
     by_symbol = {row["symbol"]: row for row in positions}
-    total_mv = sum((row.get("market_value") or 0.0) for row in positions)
+    total_mv = sum((_to_float(row.get("market_value")) or 0.0) for row in positions)
 
-    target = float(config.get("target_usd", _DEFAULT_TARGET_USD))
+    target = _to_float(config.get("target_usd")) or _DEFAULT_TARGET_USD
     distance = target - total_mv
 
     month_start, month_end = _month_bounds(_utc_today())
@@ -187,19 +195,19 @@ def handle_book(message: dict) -> str:
         .execute()
         .data
     )
-    contrib_total = sum((row.get("amount") or 0.0) for row in contribs)
+    contrib_total = sum((_to_float(row.get("amount")) or 0.0) for row in contribs)
 
     trips = client.table("round_trips").select("delta_shares").execute().data
     n_trades = len(trips)
-    cum_delta = sum((row.get("delta_shares") or 0.0) for row in trips)
+    cum_delta = sum((_to_float(row.get("delta_shares")) or 0.0) for row in trips)
     phase = config.get("phase", "?")
     next_cp = _next_checkpoint(n_trades, _checkpoints(config))
 
-    musk_mv = sum((by_symbol.get(s, {}).get("market_value") or 0.0) for s in ("TSLA", "SPCX"))
+    musk_mv = sum((_to_float(by_symbol.get(s, {}).get("market_value")) or 0.0) for s in ("TSLA", "SPCX"))
 
     lines = [f"*Your Book* — snapshot {snap_date}", "", "*Allocation*"]
     for symbol in sorted(by_symbol):
-        mv = by_symbol[symbol].get("market_value") or 0.0
+        mv = _to_float(by_symbol[symbol].get("market_value")) or 0.0
         lines.append(f"• {symbol}: {_money(mv)}  ({_pct(mv, total_mv)})")
     lines.append(f"• *Total*: {_money(total_mv)}")
     lines.append("")
@@ -240,7 +248,7 @@ def handle_journal(message: dict) -> str:
         .data
     )
     n_trades = len(trips)
-    cum_delta = sum((row.get("delta_shares") or 0.0) for row in trips)
+    cum_delta = sum((_to_float(row.get("delta_shares")) or 0.0) for row in trips)
     phase = config.get("phase", "?")
     checkpoints = _checkpoints(config)
     next_cp = _next_checkpoint(n_trades, checkpoints)
@@ -271,7 +279,7 @@ def handle_journal(message: dict) -> str:
             conf_str = f" · conf {conf}/5" if conf is not None else ""
             lines.append(
                 f"• {row['date']} {row['symbol']}: "
-                f"P&L {_money(row.get('pnl_usd'))} · Δ {_signed(row.get('delta_shares'))}{conf_str}"
+                f"P&L {_money(_to_float(row.get('pnl_usd')))} · Δ {_signed(_to_float(row.get('delta_shares')))}{conf_str}"
             )
     else:
         lines.append("No round trips recorded yet.")

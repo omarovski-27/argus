@@ -139,12 +139,19 @@ def _upcoming_calendar(client, today: date) -> list[dict]:
 
 
 def _recent_headlines(client) -> list[dict]:
-    """Headlines from the last 48h, each with its joined sentiment rows (newest first)."""
+    """Headlines from the last 48h, each with its joined sentiment rows (newest first).
+
+    Law 7: the fetchers deliberately keep headlines whose date won't parse with
+    ``published_at`` NULL, and those still get Haiku-scored — so a bare
+    ``gte("published_at", …)`` would silently drop a fetched, scored headline (NULL >=
+    cutoff is never true). Fall back to ``created_at`` for NULL-dated rows so any scored
+    headline within the window reaches the bundle.
+    """
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=_HEADLINE_LOOKBACK_HOURS)).isoformat()
     return (
         client.table("headlines")
         .select("*,sentiment(*)")
-        .gte("published_at", cutoff)
+        .or_(f"published_at.gte.{cutoff},and(published_at.is.null,created_at.gte.{cutoff})")
         .order("published_at", desc=True)
         .execute()
         .data

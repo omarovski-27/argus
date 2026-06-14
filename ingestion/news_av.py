@@ -87,16 +87,17 @@ def _av_direction(label: str | None) -> str:
     return "neutral"
 
 
-def _clamp01(value: object) -> float | None:
-    """Coerce to float and clamp to [0.0, 1.0]; unparseable -> None.
+def _magnitude(value: object) -> float | None:
+    """Coerce AV's signed ``overall_sentiment_score`` to an unsigned magnitude; else None.
 
-    Per the task brief, magnitude is ``overall_sentiment_score`` clamped to 0–1. AV
-    scores are signed (~-0.35..+0.35), so a bearish score clamps to 0.0 — the bull/bear
-    sign is carried by ``direction``, not the magnitude. (The schema comment recommends
-    magnitude=strength; the 0–1 clamp here follows the explicit Phase-1 instruction.)
+    The schema convention is magnitude = strength, with the bull/bear sign carried by
+    ``direction``. AV scores are signed (~-0.35..+0.35), so we store ``abs(score)`` —
+    otherwise a [0,1] clamp would map every bearish article to 0.0 and make strong- and
+    mild-bearish indistinguishable. This matches how the Haiku path writes the column
+    (a 0–1 strength). Bounded to 1.0 in case AV ever returns a magnitude beyond ±1.
     """
     try:
-        return max(0.0, min(1.0, float(value)))  # type: ignore[arg-type]
+        return min(1.0, abs(float(value)))  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
 
@@ -206,7 +207,7 @@ def fetch_av_news(run_id: str) -> None:
             "headline_id": hid,
             "method": "av_native",
             "direction": _av_direction(item.get("overall_sentiment_label")),
-            "magnitude": _clamp01(item.get("overall_sentiment_score")),
+            "magnitude": _magnitude(item.get("overall_sentiment_score")),
         }
 
     new_rows = list(sentiment_by_hid.values())

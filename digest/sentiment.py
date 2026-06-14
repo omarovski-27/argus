@@ -43,6 +43,7 @@ from shared.fetch_logger import write_fetch_log
 _HAIKU_MODEL = "claude-haiku-4-5-20251001"
 _DIRECTIONS = ("bullish", "bearish", "neutral")
 _IN_CHUNK = 200  # keep PostgREST `in_(...)` filters (URL length) bounded
+_LLM_CHUNK = 50  # headlines per Haiku call — bound output so the JSON array can't truncate
 
 # The classifier contract. Returns a JSON array so one call scores the whole batch.
 _SYSTEM_PROMPT = (
@@ -135,17 +136,23 @@ def score_headlines(headline_ids: list[int], run_id: str) -> None:
 
     anthropic_client = Anthropic(api_key=_anthropic_key())
     start = time.monotonic()
+    parsed: list[dict] = []
     try:
-        message = anthropic_client.messages.create(
-            model=_HAIKU_MODEL,
-            max_tokens=min(8192, 256 + 64 * len(to_score)),
-            system=_SYSTEM_PROMPT,
-            messages=[
-                {"role": "user", "content": json.dumps(to_score, ensure_ascii=False)}
-            ],
-        )
-        text = next((b.text for b in message.content if b.type == "text"), "")
-        parsed = _parse_scores(text)
+        # Batch the LLM call too (not just the title fetch): one call per ~50 headlines
+        # keeps each output under max_tokens so the JSON array can't truncate on a large
+        # backlog (first run / post-outage), which would throw in _parse_scores and lose
+        # the whole batch (Law 7).
+        for batch in _chunks(to_score, _LLM_CHUNK):
+            message = anthropic_client.messages.create(
+                model=_HAIKU_MODEL,
+                max_tokens=min(8192, 256 + 64 * len(batch)),
+                system=_SYSTEM_PROMPT,
+                messages=[
+                    {"role": "user", "content": json.dumps(batch, ensure_ascii=False)}
+                ],
+            )
+            text = next((b.text for b in message.content if b.type == "text"), "")
+            parsed.extend(_parse_scores(text))
     except Exception as exc:  # noqa: BLE001 — surface, log, never swallow (Law 7)
         write_fetch_log("haiku_sentiment", run_id, "failure", _elapsed_ms(start), str(exc))
         print(f"[sentiment] Haiku scoring FAILED — {exc}")
@@ -155,7 +162,10 @@ def score_headlines(headline_ids: list[int], run_id: str) -> None:
     rows: list[dict] = []
     seen: set[int] = set()
     for entry in parsed:
-        hid = entry.get("id")
+        try:
+            hid = int(entry.get("id"))  # LLMs often return the id as a string ("42")
+        except (TypeError, ValueError):
+            continue  # missing/unparseable id
         direction = entry.get("direction")
         if hid not in titles_by_id or hid in seen:
             continue  # unknown/hallucinated id or a duplicate in the batch
@@ -175,8 +185,18 @@ def score_headlines(headline_ids: list[int], run_id: str) -> None:
         client.table("sentiment").upsert(
             rows, on_conflict="headline_id,method", ignore_duplicates=True
         ).execute()
-    write_fetch_log("haiku_sentiment", run_id, "success", latency_ms)
-    print(f"[sentiment] scored {len(rows)} headline(s) via Haiku ({latency_ms} ms).")
+
+    # Completeness check (Law 7): a partial reply (e.g. 30 of 50 ids) leaves the rest
+    # unscored with no row — that must surface, not log success unconditionally.
+    requested = len(to_score)
+    scored = len(rows)
+    if scored < requested:
+        note = f"Haiku scored {scored}/{requested} headline(s) — {requested - scored} unscored"
+        write_fetch_log("haiku_sentiment", run_id, "unavailable", latency_ms, note)
+        print(f"[sentiment] PARTIAL — {note} ({latency_ms} ms).")
+    else:
+        write_fetch_log("haiku_sentiment", run_id, "success", latency_ms)
+        print(f"[sentiment] scored {scored} headline(s) via Haiku ({latency_ms} ms).")
 
 
 if __name__ == "__main__":
