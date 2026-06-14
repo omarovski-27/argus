@@ -143,7 +143,7 @@ def _recent_headlines(client) -> list[dict]:
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=_HEADLINE_LOOKBACK_HOURS)).isoformat()
     return (
         client.table("headlines")
-        .select("*, sentiment(*)")
+        .select("*,sentiment(*)")
         .gte("published_at", cutoff)
         .order("published_at", desc=True)
         .execute()

@@ -1,0 +1,39 @@
+name: Digest
+
+# Weekly full digest (Mon 11:00 UTC) + on-demand pulse via /pulse (workflow_dispatch).
+# The cron run passes no input, so run_type defaults to 'monday'; /pulse dispatches
+# run_type='pulse'. (digest.pipeline maps these to the digests.run_type 'full'|'pulse'.)
+on:
+  schedule:
+    - cron: '0 11 * * 1'        # Monday 11:00 UTC — full weekly digest
+  workflow_dispatch:
+    inputs:
+      run_type:
+        description: 'monday or pulse'
+        default: 'monday'
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    # Every env var the pipeline's modules read, sourced from GitHub repo secrets.
+    # (GH_DISPATCH_PAT / GH_REPO are Vercel-only — these jobs don't dispatch, and the
+    #  GITHUB_ secret-name prefix is reserved by Actions — so they are not listed here.)
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      TIINGO_API_KEY: ${{ secrets.TIINGO_API_KEY }}
+      ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
+      FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+      FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      IBKR_FLEX_TOKEN: ${{ secrets.IBKR_FLEX_TOKEN }}
+      IBKR_FLEX_QUERY_ID: ${{ secrets.IBKR_FLEX_QUERY_ID }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - run: python -m digest.pipeline --run-type ${{ github.event.inputs.run_type || 'monday' }}
