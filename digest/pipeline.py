@@ -84,7 +84,7 @@ def _elapsed_ms(start: float) -> int:
 
 def _anthropic_key() -> str:
     """Read ANTHROPIC_API_KEY from the env (loading .env in dev); fail loud if absent."""
-    load_dotenv()
+    load_dotenv(override=True)
     key = os.environ.get("ANTHROPIC_API_KEY")
     if not key:
         raise RuntimeError("Missing ANTHROPIC_API_KEY (see .env.example).")
@@ -195,7 +195,7 @@ def _send_telegram(text: str) -> None:
     Splits on the 4096-char limit. The bot token rides in the URL, so any httpx error is
     re-raised with the token redacted (Law 13: secrets never leak, even to logs).
     """
-    load_dotenv()
+    load_dotenv(override=True)
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
@@ -227,7 +227,7 @@ def run_pipeline(run_type: str = "monday", run_id: str | None = None) -> None:
     Data steps are best-effort (logged + surfaced, never aborting the run); the critical
     tail (bundle -> synthesis -> store -> Telegram) logs and re-raises on failure (Law 7).
     """
-    load_dotenv()
+    load_dotenv(override=True)
     run_id = run_id or f"pipeline-{uuid.uuid4().hex[:12]}"
     if run_type not in ("monday", "full", "pulse"):
         raise ValueError(f"unknown run_type {run_type!r}; expected 'monday', 'full' or 'pulse'")

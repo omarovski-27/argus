@@ -74,7 +74,7 @@ def _clamp01(value: object) -> float | None:
 
 def _anthropic_key() -> str:
     """Read ANTHROPIC_API_KEY from the env (loading .env in dev); fail loud if absent."""
-    load_dotenv()
+    load_dotenv(override=True)
     key = os.environ.get("ANTHROPIC_API_KEY")
     if not key:
         raise RuntimeError("Missing ANTHROPIC_API_KEY (see .env.example).")

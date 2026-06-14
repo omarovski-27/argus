@@ -80,7 +80,7 @@ def send_message(text: str, parse_mode: str = "Markdown") -> None:
     if not text:
         return
 
-    load_dotenv()
+    load_dotenv(override=True)
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     if not token or not chat_id:

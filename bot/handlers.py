@@ -439,7 +439,7 @@ def handle_pulse(message: dict) -> str:
     secrets (see .env.example). On failure, surfaces the problem to the user (Law 7)
     without leaking the PAT (it rides in a header, not the URL). ``message`` is unused.
     """
-    load_dotenv()
+    load_dotenv(override=True)
     repo = os.environ.get("GH_REPO")
     pat = os.environ.get("GH_DISPATCH_PAT")
     if not repo or not pat:
