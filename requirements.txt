@@ -1,3 +1,9 @@
 supabase
 httpx
 python-dotenv
+pandas
+pandas-ta
+# pandas-ta 0.3.x does `from numpy import NaN`, which numpy>=2.0 removed — pin <2 so
+# `import pandas_ta` (ingestion/indicators.py) doesn't crash on a fresh install.
+numpy<2.0
+anthropic
