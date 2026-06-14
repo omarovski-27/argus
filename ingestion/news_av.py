@@ -23,14 +23,13 @@ Endpoint:
 DEVIATIONS FROM THE TASK BRIEF (the applied schema / committed config are truth):
   • Env var is ALPHAVANTAGE_API_KEY (committed .env.example), not AV_API_KEY — used
     here so the code matches the real environment.
-  • The applied migration has NO unique(headline_id, method) constraint on `sentiment`,
-    so an `on_conflict='headline_id,method'` upsert is impossible (Postgres 42P10).
-    Idempotency is achieved instead by filtering out headline_ids that already carry an
-    av_native row, then plain-inserting the remainder.
+  • `sentiment` now carries a UNIQUE(headline_id, method) constraint, so av_native scores
+    write with a real `on_conflict='headline_id,method', ignore_duplicates=True` upsert —
+    idempotent at the DB, replacing the SELECT-then-insert pre-filter used while the
+    constraint was absent.
   • AV's auth param is `apikey` (no underscore). shared.fetcher_base._SECRET_PARAM_RE
-    redacts api_key/token/t but NOT `apikey`, so an AV HTTP error could echo the key
-    into fetch_log. Recommended follow-up: add `apikey` to that regex (a one-line shared
-    change, intentionally left out here so this task does not touch the verified layer).
+    now redacts `apikey` alongside api_key/token/t, so the AV key is stripped from any
+    logged or raised error text and never reaches fetch_log (Law 13).
 
 Run:  python -m ingestion.news_av   (or: python ingestion/news_av.py)
 """
@@ -128,8 +127,8 @@ def fetch_av_news(run_id: str) -> None:
         run_id: Run identifier, logged to ``fetch_log`` to group this run's fetches.
 
     One HTTP call (the whole 25/day budget). Headlines upsert on the ``url`` dedup key
-    (ignore duplicates); av_native sentiment rows are inserted for headlines that don't
-    already have one (idempotent without an on_conflict target — see module docstring).
+    (ignore duplicates); av_native sentiment rows upsert on the UNIQUE(headline_id,
+    method) constraint (``ignore_duplicates=True``), so re-runs stay idempotent.
     A transport outage is surfaced (already in fetch_log via the shared fetcher, Law 7)
     and the run continues without AV headlines so the digest still generates.
     """
@@ -210,21 +209,11 @@ def fetch_av_news(run_id: str) -> None:
             "magnitude": _clamp01(item.get("overall_sentiment_score")),
         }
 
-    already: set[int] = set()
-    hids = list(sentiment_by_hid)
-    if hids:
-        scored = (
-            client.table("sentiment")
-            .select("headline_id")
-            .eq("method", "av_native")
-            .in_("headline_id", hids)
-            .execute()
-        )
-        already = {row["headline_id"] for row in (scored.data or [])}
-
-    new_rows = [row for hid, row in sentiment_by_hid.items() if hid not in already]
+    new_rows = list(sentiment_by_hid.values())
     if new_rows:
-        client.table("sentiment").insert(new_rows).execute()
+        client.table("sentiment").upsert(
+            new_rows, on_conflict="headline_id,method", ignore_duplicates=True
+        ).execute()
 
     print(
         f"[news_av] upserted {len(headline_rows)} headline(s); "

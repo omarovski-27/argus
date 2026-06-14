@@ -21,7 +21,7 @@ RETRY_BACKOFF_SECONDS: float = 30.0
 # token (`t`) travel in the query string (those APIs offer no header auth), and
 # httpx error strings echo the full request URL. Redact them from any logged or
 # raised error text (Law 13 / blueprint §13: secrets never leak, even to the DB).
-_SECRET_PARAM_RE = re.compile(r"(?i)\b(api_key|token|t)=[^&\s]+")
+_SECRET_PARAM_RE = re.compile(r"(?i)\b(api_key|apikey|token|t)=[^&\s]+")
 
 
 def _redact(text: str) -> str:

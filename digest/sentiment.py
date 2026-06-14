@@ -11,11 +11,11 @@ Messages API with its own SDK-level retries. The call is still wrapped and timed
 its outcome is written to ``fetch_log`` (source='haiku_sentiment') so a scoring failure
 is never silent (Law 7).
 
-DEVIATION FROM THE TASK BRIEF (applied schema is truth): the migration has no
-unique(headline_id, method) constraint on ``sentiment``, so an
-``on_conflict='headline_id,method'`` upsert is impossible (Postgres 42P10). Idempotency
-is achieved by skipping ids already scored ``haiku`` and plain-inserting the rest — this
-also makes the function safe to call with ids that were already scored.
+``sentiment`` has a UNIQUE(headline_id, method) constraint, so haiku scores write with a
+real ``on_conflict='headline_id,method', ignore_duplicates=True`` upsert — idempotent at
+the DB. This replaces the earlier skip-already-scored-then-insert workaround and keeps
+the function safe to call with ids that were already scored (a duplicate score is
+ignored, not re-inserted).
 
 Run:  python -m digest.sentiment   (or: python digest/sentiment.py)
 """
@@ -107,9 +107,10 @@ def score_headlines(headline_ids: list[int], run_id: str) -> None:
         run_id: Run identifier, logged to ``fetch_log`` (source='haiku_sentiment').
 
     Swappable scorer interface (§8). One batch Haiku call scores all titles; the parsed
-    results are validated (known id, valid direction) and inserted for ids not already
-    scored ``haiku``. The Haiku call is timed and its outcome logged; a failure is
-    surfaced and re-raised, never swallowed (Law 7).
+    results are validated (known id, valid direction) and upserted on the
+    UNIQUE(headline_id, method) constraint (``ignore_duplicates=True``). The Haiku call
+    is timed and its outcome logged; a failure is surfaced and re-raised, never swallowed
+    (Law 7).
     """
     if not headline_ids:
         return
@@ -123,22 +124,10 @@ def score_headlines(headline_ids: list[int], run_id: str) -> None:
         for row in resp.data or []:
             titles_by_id[row["id"]] = row.get("title") or ""
 
-    # Skip ids already haiku-scored (idempotency without an on_conflict target).
-    already: set[int] = set()
-    for chunk in _chunks(headline_ids, _IN_CHUNK):
-        resp = (
-            client.table("sentiment")
-            .select("headline_id")
-            .eq("method", "haiku")
-            .in_("headline_id", chunk)
-            .execute()
-        )
-        already.update(row["headline_id"] for row in (resp.data or []))
-
     to_score = [
         {"id": hid, "title": titles_by_id[hid]}
         for hid in headline_ids
-        if hid in titles_by_id and hid not in already and titles_by_id[hid].strip()
+        if hid in titles_by_id and titles_by_id[hid].strip()
     ]
     if not to_score:
         print("[sentiment] nothing to score (already scored / missing titles).")
@@ -168,8 +157,8 @@ def score_headlines(headline_ids: list[int], run_id: str) -> None:
     for entry in parsed:
         hid = entry.get("id")
         direction = entry.get("direction")
-        if hid not in titles_by_id or hid in already or hid in seen:
-            continue  # unknown/hallucinated id, already scored, or a duplicate in the batch
+        if hid not in titles_by_id or hid in seen:
+            continue  # unknown/hallucinated id or a duplicate in the batch
         if direction not in _DIRECTIONS:
             continue  # would violate the direction CHECK
         seen.add(hid)
@@ -183,7 +172,9 @@ def score_headlines(headline_ids: list[int], run_id: str) -> None:
         )
 
     if rows:
-        client.table("sentiment").insert(rows).execute()
+        client.table("sentiment").upsert(
+            rows, on_conflict="headline_id,method", ignore_duplicates=True
+        ).execute()
     write_fetch_log("haiku_sentiment", run_id, "success", latency_ms)
     print(f"[sentiment] scored {len(rows)} headline(s) via Haiku ({latency_ms} ms).")
 
