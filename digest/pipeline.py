@@ -49,6 +49,7 @@ from dotenv import load_dotenv
 from digest.bundle import assemble_bundle
 from digest.dedup import get_unscored_headline_ids
 from digest.sentiment import score_headlines
+from ingestion.fred import fetch_macro
 from ingestion.indicators import compute_indicators
 from ingestion.news_av import fetch_av_news
 from ingestion.news_reddit import fetch_reddit_news
@@ -237,6 +238,7 @@ def run_pipeline(run_type: str = "monday", run_id: str | None = None) -> None:
         _step(run_id, "av_news", lambda: fetch_av_news(run_id))
         _step(run_id, "reuters_news", lambda: fetch_reuters_news(run_id))
         _step(run_id, "reddit_news", lambda: fetch_reddit_news(run_id))
+        _step(run_id, "macro", lambda: fetch_macro(run_id))
         _step(run_id, "indicators", lambda: compute_indicators(run_id))
         _step(run_id, "scoring", lambda: score_headlines(get_unscored_headline_ids(run_id), run_id))
 
