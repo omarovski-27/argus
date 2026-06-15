@@ -3,7 +3,7 @@
 Wires the Phase-1 data layer into a single deterministic run (Law 8: boring, no
 agentic control flow):
 
-    fetch (av/reuters/reddit) -> compute indicators -> Haiku score new headlines ->
+    fetch (av/marketwatch/reddit) -> compute indicators -> Haiku score new headlines ->
     assemble frozen bundle -> Sonnet synthesis -> store digest (+bundle_json) -> Telegram
 
 Two run types:
@@ -53,7 +53,7 @@ from ingestion.fred import fetch_macro
 from ingestion.indicators import compute_indicators
 from ingestion.news_av import fetch_av_news
 from ingestion.news_reddit import fetch_reddit_news
-from ingestion.news_reuters import fetch_reuters_news
+from ingestion.news_wire import fetch_wire_news
 from shared.db import get_client
 from shared.fetch_logger import write_fetch_log
 
@@ -236,7 +236,7 @@ def run_pipeline(run_type: str = "monday", run_id: str | None = None) -> None:
 
     if run_type != "pulse":
         _step(run_id, "av_news", lambda: fetch_av_news(run_id))
-        _step(run_id, "reuters_news", lambda: fetch_reuters_news(run_id))
+        _step(run_id, "wire_news", lambda: fetch_wire_news(run_id))
         _step(run_id, "reddit_news", lambda: fetch_reddit_news(run_id))
         _step(run_id, "macro", lambda: fetch_macro(run_id))
         _step(run_id, "indicators", lambda: compute_indicators(run_id))
