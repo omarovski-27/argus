@@ -1,8 +1,10 @@
 """Argus ingestion — Alpha Vantage NEWS_SENTIMENT fetcher (blueprint §5 / §7 / §8).
 
 Alpha Vantage is Argus's company-news layer and the ONLY consumer of its free-tier
-budget — 25 req/day reserved 100% for news sentiment (Law 3). One call per run pulls
-the latest NEWS_SENTIMENT feed for the traded tickers and stores two things:
+budget — 25 req/day reserved 100% for news sentiment (Law 3). One call PER TICKER pulls
+the latest NEWS_SENTIMENT feed (AV's comma-joined ``tickers=`` filter is AND, not OR,
+so a joined call matches only stories naming every ticker — almost never), and the
+accumulated feed is de-duped by url before storing two things:
 
     feed item -> headlines   (source='av', url dedup key, title, published_at, ticker_tags)
     feed item -> sentiment   (method='av_native', from AV's own overall_sentiment_*)
@@ -10,15 +12,16 @@ the latest NEWS_SENTIMENT feed for the traded tickers and stores two things:
 AV's native scores ride along free with the same call, so we persist them immediately;
 a second, swappable Haiku pass scores the same headlines later (digest/sentiment.py, §8).
 
-Endpoint:
+Endpoint (one request per ticker):
     GET https://www.alphavantage.co/query
-        ?function=NEWS_SENTIMENT&tickers=TSLA,SPCX&apikey=...&limit=50
+        ?function=NEWS_SENTIMENT&tickers=TSLA&apikey=...&limit=50
     Response: {"feed": [{url, title, time_published, overall_sentiment_label,
                          overall_sentiment_score, ticker_sentiment: [...]}, ...]}.
+    Each ticker logs to fetch_log under ``av:<ticker>`` (mirrors ``fred:<series>``).
     An over-budget / throttled response carries NO "feed" key (an "Information" or
-    "Note" string instead); that is surfaced as `unavailable` rather than silently
-    treated as empty (Law 7). SPCX simply not appearing in AV coverage yet is NOT an
-    error — we store whatever the feed contains.
+    "Note" string instead); that ticker is surfaced as `unavailable` (Law 7). A ``feed``
+    key present but EMPTY is honest no-coverage (a ticker AV does not currently cover), NOT an
+    outage — it is printed but never logged unavailable.
 
 DEVIATIONS FROM THE TASK BRIEF (the applied schema / committed config are truth):
   • Env var is ALPHAVANTAGE_API_KEY (committed .env.example), not AV_API_KEY — used
@@ -51,8 +54,11 @@ from shared.fetch_logger import write_fetch_log
 from shared.fetcher_base import fetch_with_retry
 
 AV_QUERY_URL = "https://www.alphavantage.co/query"
-_AV_TICKERS: tuple[str, ...] = ("TSLA", "SPCX")
-_AV_LIMIT = 50                 # one call/run; the entire 25/day budget (Law 3)
+# SPCX excluded: AV's symbol resolver maps it to the unrelated Tuttle "SPAC & New
+# Issue ETF" (ticker SPCK), not SpaceX — wrong entity (Law 2). Revisit if AV ever
+# maps the real SpaceX SPCX (IPO 2026-06-12).
+_AV_TICKERS: tuple[str, ...] = ("TSLA",)
+_AV_LIMIT = 50                 # per-ticker page size; 1 call/ticker (TSLA only → 1/25 daily, Law 3)
 _RELEVANCE_THRESHOLD = 0.3     # a ticker is tagged when AV relevance_score >= 0.3
 
 
@@ -127,46 +133,78 @@ def fetch_av_news(run_id: str) -> None:
     Args:
         run_id: Run identifier, logged to ``fetch_log`` to group this run's fetches.
 
-    One HTTP call (the whole 25/day budget). Headlines upsert on the ``url`` dedup key
-    (ignore duplicates); av_native sentiment rows upsert on the UNIQUE(headline_id,
-    method) constraint (``ignore_duplicates=True``), so re-runs stay idempotent.
-    A transport outage is surfaced (already in fetch_log via the shared fetcher, Law 7)
-    and the run continues without AV headlines so the digest still generates.
+    One HTTP call PER TICKER (AV's comma-joined tickers= filter is AND, not OR, so a
+    joined call matches only stories naming every ticker — almost never). With the one
+    tracked ticker (TSLA) that is 1 of the 25/day budget (Law 3); each logs under
+    ``av:<ticker>``.
+    The accumulated feed is de-duped by ``url`` before storing. Headlines upsert on the
+    ``url`` dedup key (ignore duplicates); av_native sentiment rows upsert on the
+    UNIQUE(headline_id, method) constraint (``ignore_duplicates=True``), so re-runs stay
+    idempotent. A per-ticker outage is surfaced (already in fetch_log via the shared
+    fetcher, Law 7) and skipped so one ticker cannot blind the other.
     """
     api_key = os.environ.get("ALPHAVANTAGE_API_KEY")
     if not api_key:
         raise RuntimeError("Missing ALPHAVANTAGE_API_KEY (see .env.example).")
 
     client = get_client()
-    params = {
-        "function": "NEWS_SENTIMENT",
-        "tickers": ",".join(_AV_TICKERS),
-        "apikey": api_key,
-        "limit": _AV_LIMIT,
-    }
 
-    try:
-        payload = fetch_with_retry(AV_QUERY_URL, {}, params, "av", run_id)
-    except FetchError as exc:
-        # Already logged to fetch_log by the shared fetcher; surface and move on.
-        print(f"[news_av] unavailable — {exc}")
-        return
+    # One call per ticker — AV's tickers= filter ANDs multiple symbols, so a joined
+    # request returns near-nothing. Accumulate every ticker's feed, then de-dup by url.
+    feed: list[dict] = []
+    for ticker in _AV_TICKERS:
+        params = {
+            "function": "NEWS_SENTIMENT",
+            "tickers": ticker,
+            "apikey": api_key,
+            "limit": _AV_LIMIT,
+        }
 
-    feed = payload.get("feed") if isinstance(payload, dict) else None
-    if not feed:
-        # HTTP 200 but no feed: budget exhausted or throttled. AV explains via an
-        # Information/Note string. Surface it as a logical outage (Law 7).
-        note = ""
-        if isinstance(payload, dict):
-            note = (
-                payload.get("Information")
-                or payload.get("Note")
-                or payload.get("Error Message")
-                or ""
+        try:
+            payload = fetch_with_retry(AV_QUERY_URL, {}, params, f"av:{ticker}", run_id)
+        except FetchError as exc:
+            # Already logged by the shared fetcher; surface and move on so one ticker's
+            # outage does not blind the other (Law 7).
+            print(f"[news_av] {ticker}: unavailable — {exc}")
+            continue
+
+        feed_items = payload.get("feed") if isinstance(payload, dict) else None
+        if not isinstance(feed_items, list):
+            # HTTP 200 but no 'feed' key: budget exhausted or throttled. AV explains via
+            # an Information/Note string. Surface it as a logical outage (Law 7).
+            note = ""
+            if isinstance(payload, dict):
+                note = (
+                    payload.get("Information")
+                    or payload.get("Note")
+                    or payload.get("Error Message")
+                    or ""
+                )
+            write_fetch_log(
+                f"av:{ticker}", run_id, "unavailable", 0,
+                note or "'feed' key missing",
             )
-        write_fetch_log("av", run_id, "unavailable", 0, note or "no 'feed' in AV response")
-        print(f"[news_av] no feed returned (budget/throttle?): {note or 'empty response'}")
-        return
+            print(f"[news_av] {ticker}: no feed (budget/throttle?): {note or 'empty response'}")
+            continue
+
+        if not feed_items:
+            # 'feed' present but empty: honest no-coverage (e.g. SPCX not in AV yet).
+            # A real fact, not an outage — printed, never logged unavailable (Law 7).
+            print(f"[news_av] {ticker}: no AV coverage yet (empty feed).")
+            continue
+
+        feed.extend(feed_items)
+        print(f"[news_av] {ticker}: {len(feed_items)} feed item(s).")
+
+    # De-dup the accumulated feed by url (keep one item per url). A story tagging both
+    # tickers arrives in both feeds with an identical ticker_sentiment array, so this is
+    # lossless — it just collapses the cross-tagged duplicate before storing.
+    deduped: dict[str, dict] = {}
+    for item in feed:
+        url = item.get("url")
+        if url and url not in deduped:
+            deduped[url] = item
+    feed = list(deduped.values())
 
     headline_rows = []
     for item in feed:
