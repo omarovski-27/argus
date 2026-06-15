@@ -41,6 +41,10 @@ node_modules/
 *.db
 data/local/
 
+# ── Dry-run scratch (frozen bundle for synthesis-prompt iteration) ───
+_bundle_dryrun.json
+*_dryrun.json
+
 # ── Editor / OS cruft ────────────────────────────────────────────────
 .idea/
 .vscode/

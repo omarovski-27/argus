@@ -26,6 +26,8 @@ no-recommendation (Law 1) and grounding (Law 2) clauses. Farm B replaces it with
 full §7 five-clause contract.
 
 Run:  python -m digest.pipeline --run-type monday   (or: ... --run-type pulse)
+      python -m digest.pipeline --run-type monday --dry-run   (freeze bundle, no
+          synthesis/store/Telegram — see ``_dry_run_finish``)
 """
 
 from __future__ import annotations
@@ -38,6 +40,7 @@ if __name__ == "__main__" and __package__ in (None, ""):
 
 import json
 import os
+import sys
 import time
 import uuid
 from datetime import datetime, timezone
@@ -59,6 +62,7 @@ from shared.fetch_logger import write_fetch_log
 
 _SONNET_MODEL = "claude-sonnet-4-6"
 _TELEGRAM_LIMIT = 4096  # Telegram sendMessage hard cap (chars)
+_DRY_RUN_BUNDLE_PATH = "_bundle_dryrun.json"  # gitignored scratch (see --dry-run)
 
 # Synthesis stub system prompt. Minimal, but Law 1 (no recommendation) and Law 2
 # (grounding) are binding on EVERY synthesis prompt — they stay even in the stub.
@@ -217,13 +221,98 @@ def _send_telegram(text: str) -> None:
     print(f"[pipeline] sent digest to Telegram in {len(chunks)} message(s).")
 
 
-def run_pipeline(run_type: str = "monday", run_id: str | None = None) -> None:
+def _dry_run_finish(bundle: dict, run_id: str, path: str = _DRY_RUN_BUNDLE_PATH) -> None:
+    """Dry-run tail: freeze the assembled bundle to a scratch file + print a completeness summary.
+
+    Replaces the live tail (synthesis -> store -> Telegram) with NO Sonnet call, NO digest
+    row, and NO Telegram push. Writes the exact ``bundle_json`` to ``path`` (gitignored) so the
+    synthesis prompt can later be iterated against a FIXED bundle without re-fetching or
+    spending, and prints per-section counts so the bundle's completeness is verifiable at a
+    glance. Iterates the bundle's own dicts (which always carry all 6 macro series and all 4
+    tracked symbols as keys), so a MISSING series or a SUPPRESSED young ticker is visible.
+    """
+    # Windows consoles default to cp1252, which can't encode characters that legitimately
+    # appear in Reddit/AV titles (full-width '？', emoji) or the Δ below — and an
+    # UnicodeEncodeError mid-summary would abort AFTER the bundle was frozen but BEFORE the
+    # "no synthesis/store/Telegram" confirmation prints. Reconfigure to UTF-8 (errors=
+    # 'replace' as a floor) so a summary line can never crash the run.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001 — non-reconfigurable stream (capture/redirect): best-effort
+        pass
+
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(bundle, fh, ensure_ascii=False, indent=2, default=str)
+
+    macro = bundle.get("macro") or {}
+    present = sum(1 for v in macro.values() if v)
+    print(f"[dry-run] macro: {present}/{len(macro)} FRED series with a value")
+    for series_id, row in macro.items():
+        if row:
+            print(f"           {series_id:<9} = {row.get('value')}  ({row.get('date')})")
+        else:
+            print(f"           {series_id:<9} = MISSING")
+
+    by_source: dict[str, dict] = {}
+    for h in bundle.get("headlines") or []:
+        b = by_source.setdefault(
+            h.get("source") or "?", {"n": 0, "methods": set(), "sample": None}
+        )
+        b["n"] += 1
+        for s in h.get("sentiment") or []:
+            if s.get("method"):
+                b["methods"].add(s["method"])
+        if b["sample"] is None and (h.get("title") or "").strip():
+            b["sample"] = h["title"].strip()
+    total = sum(b["n"] for b in by_source.values())
+    print(f"[dry-run] headlines: {total} in last 48h")
+    for src in sorted(by_source):
+        b = by_source[src]
+        methods = ", ".join(sorted(b["methods"])) or "NONE"
+        print(f"           {src:<12} {b['n']:>3}   sentiment: {methods}")
+        print(f"           {'':<12}       e.g. {(b['sample'] or '')[:90]!r}")
+
+    print("[dry-run] indicators:")
+    for symbol, ind in (bundle.get("indicators") or {}).items():
+        names = sorted(((ind or {}).get("values") or {}).keys())
+        if names:
+            print(f"           {symbol:<5} present (as_of {ind.get('as_of')}): {', '.join(names)}")
+        else:
+            print(f"           {symbol:<5} SUPPRESSED (no indicator rows — young ticker)")
+
+    pos = bundle.get("positions") or {}
+    rt = bundle.get("round_trips") or {}
+    cal = bundle.get("calendar") or []
+    print(
+        f"[dry-run] book: positions snapshot {pos.get('date')} — "
+        f"{len(pos.get('rows') or [])} row(s); cumulative Δshares = "
+        f"{rt.get('cumulative_delta_shares')}"
+    )
+    nxt = ""
+    if cal:
+        e = cal[0]
+        label = f"{e.get('date')} {e.get('type') or ''}".strip()
+        if e.get("symbol"):
+            label += f" {e['symbol']}"
+        nxt = f" (next: {label})"
+    print(f"[dry-run] calendar: {len(cal)} event(s) in next 14d{nxt}")
+    print(f"[dry-run] config: {len(bundle.get('config') or {})} key(s)")
+    print("[dry-run] NO Sonnet call, NO digest row, NO Telegram — cost = Haiku scoring only.")
+    print(f"[dry-run] full bundle written to {path} (run {run_id}).")
+
+
+def run_pipeline(
+    run_type: str = "monday", run_id: str | None = None, dry_run: bool = False
+) -> None:
     """Run the full Phase-1 pipeline for ``run_type`` (blueprint §3 / §6 / §7).
 
     Args:
         run_type: 'monday'/'full' (full weekly digest) or 'pulse' (light run; skips
             news, scoring and indicators and synthesizes from the DB as-is).
         run_id: Optional run identifier; a uuid4-based one is generated if omitted.
+        dry_run: If True, run the full data path and assemble the bundle exactly as a
+            monday/full run, then write the frozen bundle to ``_bundle_dryrun.json`` and
+            print a summary INSTEAD of synthesizing, storing a digest, or sending Telegram.
 
     Data steps are best-effort (logged + surfaced, never aborting the run); the critical
     tail (bundle -> synthesis -> store -> Telegram) logs and re-raises on failure (Law 7).
@@ -244,6 +333,12 @@ def run_pipeline(run_type: str = "monday", run_id: str | None = None) -> None:
 
     bundle_run_type = "pulse" if run_type == "pulse" else "monday"
     bundle = _critical(run_id, "bundle", lambda: assemble_bundle(bundle_run_type))
+
+    if dry_run:
+        _dry_run_finish(bundle, run_id)
+        print(f"[pipeline] done (dry-run, no synthesis/store/telegram) run_id={run_id}")
+        return
+
     full_text = _critical(run_id, "synthesis", lambda: synthesize(bundle))
     _critical(run_id, "store_digest", lambda: _store_digest(run_type, full_text, bundle, run_id))
     _critical(run_id, "telegram", lambda: _send_telegram(full_text))
@@ -260,5 +355,11 @@ if __name__ == "__main__":
         choices=["monday", "full", "pulse"],
         help="'monday'/'full' for the weekly digest, 'pulse' for a light run.",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Run the full data path + assemble the bundle, write it to "
+        "_bundle_dryrun.json and print a summary — NO synthesis, digest row, or Telegram.",
+    )
     args = parser.parse_args()
-    run_pipeline(run_type=args.run_type)
+    run_pipeline(run_type=args.run_type, dry_run=args.dry_run)
