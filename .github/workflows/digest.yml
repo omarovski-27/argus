@@ -4,8 +4,10 @@ name: Digest
 # The cron run passes no input, so run_type defaults to 'monday'; /pulse dispatches
 # run_type='pulse'. (digest.pipeline maps these to the digests.run_type 'full'|'pulse'.)
 on:
-  schedule:
-    - cron: '0 11 * * 1'        # Monday 11:00 UTC — full weekly digest
+  # schedule disabled until the pipeline runs end-to-end; scheduled runs only
+  # fail downstream of pip right now (red mail, zero signal). Re-enable at deploy.
+  # schedule:
+  #   - cron: '0 11 * * 1'        # Monday 11:00 UTC — full weekly digest
   workflow_dispatch:
     inputs:
       run_type:

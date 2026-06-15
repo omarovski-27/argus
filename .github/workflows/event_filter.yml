@@ -3,8 +3,11 @@ name: Event Filter Check
 # Weekday 12:30 UTC (= 15:30 Amman): morning event-filter / weekly-cap warning push
 # (blueprint §8 / §2 item 10). Sends nothing unless a condition is met.
 on:
-  schedule:
-    - cron: '30 12 * * 1-5'     # 12:30 UTC, Mon-Fri
+  # schedule disabled until the pipeline runs end-to-end; scheduled runs only
+  # fail downstream of pip right now (red mail, zero signal). Re-enable at deploy.
+  # schedule:
+  #   - cron: '30 12 * * 1-5'     # 12:30 UTC, Mon-Fri
+  workflow_dispatch:             # manual trigger kept for testing
 
 jobs:
   run:
