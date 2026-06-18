@@ -3,7 +3,8 @@
 Run by GitHub Actions at 12:30 UTC on weekdays (= 15:30 Amman). The morning before,
 it surfaces two trade-suppressing conditions so Omar sees them before the open:
 
-  • a high-materiality calendar event TOMORROW (FOMC / CPI / NFP / earnings / lockup)
+  • a calendar event TOMORROW that arms the §8 filter (FOMC / CPI / NFP / earnings /
+    lockup / index — decided by shared.event_filter.triggers_event_filter)
     → the event filter is active: no round trips within 24h (§8);
   • the weekly round-trip cap already reached (§8: max 2 / calendar week).
 
@@ -29,11 +30,12 @@ from datetime import date, datetime, timedelta, timezone
 
 from bot.telegram import send_message
 from shared.db import get_client
+from shared.event_filter import FILTERED_EVENT_TYPES, triggers_event_filter
 from shared.fetch_logger import write_fetch_log
 
-# High-materiality, trade-suppressing event types (§8 event filter).
-_FILTERED_TYPES: tuple[str, ...] = ("fomc", "cpi", "nfp", "earnings", "lockup")
-# Default weekly cap (§8); overridable via config.weekly_trade_cap.
+# Default weekly cap (§8); overridable via config.weekly_trade_cap. (§8 arming itself is
+# decided by shared.event_filter.triggers_event_filter — the same predicate the digest uses,
+# called per row in check_and_warn below; this module never re-encodes the arm rule.)
 _DEFAULT_WEEKLY_CAP = 2
 
 
@@ -68,15 +70,20 @@ def check_and_warn() -> None:
         today = datetime.now(timezone.utc).date()
         tomorrow = (today + timedelta(days=1)).isoformat()
 
-        events = (
+        # §8 arming is decided in ONE place: shared.event_filter.triggers_event_filter, the
+        # same predicate the digest's Forward Calendar uses. Fetch tomorrow's candidate rows
+        # COARSELY by type (the shared FILTERED_EVENT_TYPES set — can't drift), then let the
+        # predicate make the arm call per row. When arming grows past bare type (e.g.
+        # "earnings of a traded ticker"), only the predicate changes and the push inherits it.
+        rows = (
             client.table("calendar_events")
             .select("type,symbol,materiality")
             .eq("date", tomorrow)
-            .eq("materiality", "high")
-            .in_("type", list(_FILTERED_TYPES))
+            .in_("type", list(FILTERED_EVENT_TYPES))
             .execute()
             .data
-        )
+        ) or []
+        events = [row for row in rows if triggers_event_filter(row)]
 
         cap_resp = (
             client.table("config")

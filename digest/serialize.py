@@ -29,6 +29,8 @@ if __name__ == "__main__" and __package__ in (None, ""):
 
 from datetime import date
 
+from shared.event_filter import EVENT_FILTER_RULE_TEXT, triggers_event_filter
+
 _NEWS_TOP_N = 18    # watchlist + broad-market news fed to the digest
 _RETAIL_TOP_N = 8   # Reddit retail-chatter items (sentiment signal only)
 
@@ -48,6 +50,13 @@ _CAL_LABELS = {
     "fomc": "FOMC", "cpi": "CPI release", "nfp": "Jobs report (NFP)",
     "earnings": "earnings", "lockup": "lockup expiry", "research": "analyst/research date",
 }
+_WEEKDAY_NAMES = (
+    "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
+)
+# Internal run_type tags ('monday'/'pulse') -> a display label with NO weekday name in it.
+# Printing the raw 'monday' tag beside the date made the model fuse the two into a bogus
+# '(Monday)' weekday; 'weekly' carries the same meaning with no day name to misread.
+_RUN_TYPE_DISPLAY = {"monday": "weekly", "full": "weekly", "pulse": "pulse"}
 
 
 def _fmt(value, nd: int = 2) -> str:
@@ -197,7 +206,17 @@ def _calendar_block(calendar: list) -> str:
     for e in calendar:
         label = _CAL_LABELS.get(e.get("type"), e.get("type") or "event")
         sym = f" {e['symbol']}" if e.get("symbol") else ""
-        lines.append(f"  {e.get('date')} — {label}{sym} (materiality: {e.get('materiality')})")
+        # Tag the events that arm the §8 filter (shared predicate, identical to the morning
+        # warning) so synthesis states the rule as a grounded fact for EVERY one — FOMC and
+        # NFP alike — instead of parroting it from a single hardcoded prompt example.
+        rule = (
+            f"  [{EVENT_FILTER_RULE_TEXT}]"
+            if triggers_event_filter(e)
+            else ""
+        )
+        lines.append(
+            f"  {e.get('date')} — {label}{sym} (materiality: {e.get('materiality')}){rule}"
+        )
     return "CALENDAR (next 14 days)\n" + "\n".join(lines)
 
 
@@ -279,13 +298,30 @@ def _source_health_block(sh: dict) -> str:
     )
 
 
+def _generated_for_label(bundle: dict) -> str:
+    """Render the header date line: the REAL weekday + a day-name-free run label.
+
+    Two fixes over printing the raw fields: (1) the weekday is DERIVED from generated_for
+    (locale-independent, via _WEEKDAY_NAMES) so the model never guesses it; (2) the internal
+    run_type tag maps through _RUN_TYPE_DISPLAY, so the literal word 'monday' never sits
+    beside the date to be misread as its weekday (June 18 is a Thursday, not a Monday).
+    """
+    raw = bundle.get("generated_for")
+    try:
+        weekday = f" ({_WEEKDAY_NAMES[date.fromisoformat(str(raw)).weekday()]})"
+    except (TypeError, ValueError):
+        weekday = ""
+    rt = bundle.get("run_type")
+    return f"GENERATED_FOR: {raw}{weekday}   RUN_TYPE: {_RUN_TYPE_DISPLAY.get(rt, rt or '?')}"
+
+
 def serialize_bundle(
     bundle: dict, news_top: int = _NEWS_TOP_N, retail_top: int = _RETAIL_TOP_N
 ) -> str:
     """Render the frozen bundle as the labeled text block the synthesis prompt consumes."""
     parts = [
         "=== ARGUS DIGEST INPUT ===",
-        f"GENERATED_FOR: {bundle.get('generated_for')}   RUN_TYPE: {bundle.get('run_type')}",
+        _generated_for_label(bundle),
         "",
         _prices_block(bundle.get("prices") or {}),
         "",
