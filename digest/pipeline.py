@@ -21,9 +21,10 @@ LLM calls use the ``anthropic`` SDK and the Telegram push uses ``httpx`` directl
 neither is a REST data source, so neither goes through ``shared.fetcher_base`` (which is
 a GET-only fetcher for the §5 sources). Both are still wrapped and logged (Law 7).
 
-NOTE: ``synthesize()`` is a STUB — a minimal Sonnet prompt that still carries the binding
-no-recommendation (Law 1) and grounding (Law 2) clauses. Farm B replaces it with the
-full §7 five-clause contract.
+``synthesize()`` runs the full §7 five-clause contract (Farm B): it serializes the frozen
+bundle into a labeled text block (``digest.serialize``) — never raw JSON — and Sonnet
+writes the five sections grounded in that block. The no-recommendation (Law 1) and
+grounding (Law 2) clauses are binding in the system prompt.
 
 Run:  python -m digest.pipeline --run-type monday   (or: ... --run-type pulse)
       python -m digest.pipeline --run-type monday --dry-run   (freeze bundle, no
@@ -52,6 +53,7 @@ from dotenv import load_dotenv
 from digest.bundle import assemble_bundle
 from digest.dedup import get_unscored_headline_ids
 from digest.sentiment import score_headlines
+from digest.serialize import serialize_bundle
 from ingestion.fred import fetch_macro
 from ingestion.indicators import compute_indicators
 from ingestion.news_av import fetch_av_news
@@ -64,22 +66,27 @@ _SONNET_MODEL = "claude-sonnet-4-6"
 _TELEGRAM_LIMIT = 4096  # Telegram sendMessage hard cap (chars)
 _DRY_RUN_BUNDLE_PATH = "_bundle_dryrun.json"  # gitignored scratch (see --dry-run)
 
-# Synthesis stub system prompt. Minimal, but Law 1 (no recommendation) and Law 2
-# (grounding) are binding on EVERY synthesis prompt — they stay even in the stub.
-_SYNTH_SYSTEM = (
-    "You are Argus, a portfolio-intelligence analyst writing a weekly market digest for "
-    "a single reader. STRICT, NON-NEGOTIABLE RULES:\n"
-    "1. INFORMATION, NEVER INSTRUCTION: never tell the reader to buy, sell, hold, enter, "
-    "exit, trim, add, size a position, or whether anything is 'safe to trade' or "
-    "well-timed. Describe and interpret the data; never recommend or advise an action.\n"
-    "2. GROUNDING: use ONLY the numbers and facts in the provided JSON bundle. Never "
-    "invent or recall a price, date, or figure from memory. If something is missing, say "
-    "'not available' rather than filling the gap.\n"
-    "3. Put a plain-English interpretation beside every number and mark uncertainty "
-    "honestly.\n"
-    "Write a 600-800 word analyst note in five short sections: Regime, What Moved, "
-    "Forward Calendar, Your Book, and Source Health."
-)
+# Synthesis system prompt — the §7 five-clause contract (grounding / no-recommendation /
+# fixed structure / interpretation layer / uncertainty marking). Law 1 and Law 2 are
+# binding here on EVERY run. The model is fed the labeled text block from
+# ``digest.serialize`` (never raw JSON), so it can only cite labels present in that block.
+_SYNTH_SYSTEM = """You are writing this week's Argus digest — a market-intelligence note for one reader who makes his own trading decisions. Synthesize only the DATA below into a fixed five-section note. You do not advise.
+
+Hard rules:
+1. Grounding. Every factual claim comes from the DATA block. No outside facts, prices, or events; never invent or estimate a number — and no market-lore thresholds or historical analogies that aren't in the DATA (e.g. don't assert an RSI "overbought above 70" line, a VIX "20" threshold, or that a curve "moved away from inversion" unless the DATA states it). Describe the value and its plain meaning; don't import textbook levels. You MAY locate a value on its own intrinsic scale (e.g. RSI on 0-100), but do NOT call a value high/low/contained/normal or place it in a "typical/historical range" unless the DATA supplies the comparison (a range, average, or prior reading); with no anchor, state the value and its direction only. If something needed is missing, say so.
+2. No recommendations. Never tell the reader to buy, sell, enter, exit, trim, add, hold, or wait; never call anything a good/bad entry, "safe to trade," or well-timed — including implicit nudges ("this setup looks attractive," "momentum favors…"). Describe the condition; don't direct the action.
+3. Fixed structure. Exactly these five sections, this order, every week: Regime / What Moved / Forward Calendar / Your Book / Source Health. If a section has no data, keep the header and state plainly what's missing.
+4. Interpret every number. No bare figures — say what each value means by where it sits on its own scale (e.g. "RSI14 72 — high on its 0-100 range"), not by importing a textbook level. Interpretation describes a condition; it never prescribes an action.
+5. Mark uncertainty. Flag stale, missing, or low-confidence data explicitly. Never present stale or absent data as current or complete.
+
+Sections:
+- Regime — from INDICATORS and MACRO: trend (price vs SMA50/200), momentum (RSI, MACD), macro backdrop. Interpretation beside each number. State the regime; don't judge whether it's a moment to act.
+- What Moved — from HEADLINES only: synthesize the period's themes grouped by theme; do NOT enumerate headline-by-headline. Lead with WATCHLIST & MARKET NEWS. Treat RETAIL CHATTER (Reddit) as unverified retail sentiment — you may note what retail is fixated on, but never present a Reddit claim as established fact. Paraphrase — don't reproduce headline text. No claim without a headline behind it.
+- Forward Calendar — from CALENDAR: list events with date and importance. Where an event triggers one of the reader's own preset rules, state the rule as a fact (e.g. "FOMC is today, high-importance; the event filter blocks sleeve round-trips within 24h"). State the rule; never translate it into advice.
+- Your Book — from BOOK: positions, round-trips-used vs the weekly cap, sleeve/phase status. If positions are unavailable, say exactly why (account not funded; Flex blind) — do not imply a funded-but-empty book. No verdict on the book.
+- Source Health — render the provided summary and staleness flags plainly. Name every failed, unavailable, or stale source. This section exists to surface problems; never soften or omit them.
+
+Length/tone: HARD CAP 800 words (aim ~700) — be economical. In Regime especially, group tickers with similar readings into one statement (e.g. "SPY and QQQ both sit above their 50- and 200-day averages with RSI in the mid-50s") rather than repeating every figure ticker-by-ticker. Plain analyst prose, no hype, no filler hedging, no preamble. Confident about what the data says, explicit about what it doesn't."""
 
 
 def _elapsed_ms(start: float) -> int:
@@ -118,30 +125,25 @@ def _critical(run_id: str, name: str, fn):
 
 
 def synthesize(bundle: dict) -> str:
-    """STUB: synthesize the digest prose from the frozen bundle with Sonnet.
+    """Synthesize the digest prose from the frozen bundle with Sonnet (§7 five-clause contract).
+
+    The bundle is rendered to a labeled text block by :func:`digest.serialize.serialize_bundle`
+    (never raw JSON) — the model can only cite labels present in that block, which is how
+    grounding (Law 2) and the no-recommendation rule (Law 1) stay enforceable.
 
     Args:
         bundle: The frozen synthesis input from :func:`digest.bundle.assemble_bundle`.
 
     Returns:
-        The digest text. Farm B replaces this stub with the full §7 five-clause contract;
-        the no-recommendation (Law 1) and grounding (Law 2) clauses are already enforced.
+        The digest text — five sections (Regime / What Moved / Forward Calendar / Your Book
+        / Source Health) grounded in the serialized block.
     """
     client = Anthropic(api_key=_anthropic_key())
     message = client.messages.create(
         model=_SONNET_MODEL,
         max_tokens=2000,
         system=_SYNTH_SYSTEM,
-        messages=[
-            {
-                "role": "user",
-                "content": (
-                    "Here is the frozen data bundle — the ONLY source of facts for this "
-                    "digest. Write the analyst note.\n\n"
-                    + json.dumps(bundle, ensure_ascii=False, default=str)
-                ),
-            }
-        ],
+        messages=[{"role": "user", "content": f"DATA:\n\n{serialize_bundle(bundle)}"}],
     )
     text = next((b.text for b in message.content if b.type == "text"), "")
     if not text.strip():
@@ -297,6 +299,29 @@ def _dry_run_finish(bundle: dict, run_id: str, path: str = _DRY_RUN_BUNDLE_PATH)
         nxt = f" (next: {label})"
     print(f"[dry-run] calendar: {len(cal)} event(s) in next 14d{nxt}")
     print(f"[dry-run] config: {len(bundle.get('config') or {})} key(s)")
+
+    sh = bundle.get("source_health") or {}
+    print(f"[dry-run] source health: {sh.get('summary')}")
+    for s in sh.get("sources") or []:
+        flag = "" if s.get("status") == "success" else "   <-- not OK"
+        print(f"           {str(s.get('source')):<16} {s.get('status')}{flag}")
+    stale = sh.get("staleness") or {}
+    p = stale.get("prices") or {}
+    fx = stale.get("flex") or {}
+    print(
+        f"           prices: latest {p.get('latest_date')} "
+        f"({p.get('trading_days_old')} trading-day(s) old) stale={p.get('stale')}"
+    )
+    print(
+        f"           flex:   last success {fx.get('last_success_at')} "
+        f"({fx.get('hours_old')}h old) stale={fx.get('stale')}"
+    )
+    tok = sh.get("flex_token") or {}
+    print(
+        f"           flex token: days_to_expiry={tok.get('days_to_expiry')} "
+        f"known={tok.get('known')} warn={tok.get('warn')}"
+    )
+
     print("[dry-run] NO Sonnet call, NO digest row, NO Telegram — cost = Haiku scoring only.")
     print(f"[dry-run] full bundle written to {path} (run {run_id}).")
 
