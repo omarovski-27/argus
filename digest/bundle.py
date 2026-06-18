@@ -51,6 +51,7 @@ _FETCH_LOG_SCAN = 1000          # latest-per-source scan depth (matches bot /hea
 _PRICES_STALE_TRADING_DAYS = 2  # §12: prices > 2 trading days old -> warn
 _FLEX_STALE_HOURS = 48          # §12: Flex > 48h since last success -> warn
 _TOKEN_WARN_DAYS = 30           # §7: surface Flex-token days-to-expiry when < 30
+_VIX_TRAILING_SESSIONS = 252    # ~1 trading year: VIX trailing-range + percentile window (§7)
 
 
 def _to_float(value: object) -> float | None:
@@ -131,6 +132,43 @@ def _latest_macro(client) -> dict[str, dict | None]:
         )
         out[series_id] = rows[0] if rows else None
     return out
+
+
+def _vix_trailing(client) -> dict | None:
+    """Trailing ~1y VIX range + the latest close's percentile within it (a data anchor, §7).
+
+    The digest must never let synthesis invent a scale for VIX (it has no fixed 0-100 bound):
+    this supplies the anchor FROM DATA — the latest VIXCLS close located in its own trailing
+    window (low/high + percentile rank). An aggregation of stored macro_series rows (like
+    cumulative_delta_shares), never a fabricated figure (Law 2). None if VIX is unseeded.
+    """
+    rows = (
+        client.table("macro_series")
+        .select("date,value")
+        .eq("series_id", "VIXCLS")
+        .order("date", desc=True)
+        .limit(_VIX_TRAILING_SESSIONS)
+        .execute()
+        .data
+        or []
+    )
+    pairs = [(_to_float(r.get("value")), r.get("date")) for r in rows]
+    pairs = [(v, d) for v, d in pairs if v is not None]
+    if not pairs:
+        return None
+    nums = [v for v, _ in pairs]
+    current = nums[0]  # date-desc: first row is the latest close
+    at_or_below = sum(1 for v in nums if v <= current)
+    return {
+        "series_id": "VIXCLS",
+        "as_of": pairs[0][1],
+        "window_sessions": len(nums),
+        "span": [pairs[-1][1], pairs[0][1]],
+        "current": current,
+        "low": round(min(nums), 2),
+        "high": round(max(nums), 2),
+        "percentile": round(at_or_below / len(nums) * 100),
+    }
 
 
 def _upcoming_calendar(client, today: date) -> list[dict]:
@@ -483,6 +521,7 @@ def assemble_bundle(run_type: str) -> dict:
         "prices": prices,
         "indicators": _latest_indicators(client),
         "macro": _latest_macro(client),
+        "macro_trailing": {"VIXCLS": _vix_trailing(client)},
         "calendar": _upcoming_calendar(client, today),
         "headlines": _recent_headlines(client),
         "positions": positions,

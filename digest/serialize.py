@@ -112,14 +112,43 @@ def _indicators_block(indicators: dict) -> str:
     return "INDICATORS (latest local pandas_ta values)\n" + "\n".join(lines)
 
 
-def _macro_block(macro: dict) -> str:
+def _macro_block(macro: dict, generated_for=None, trailing: dict | None = None) -> str:
+    """MACRO lines: latest value + its age (vs generated_for) + any data-provided anchor.
+
+    Age (days since the observation) and VIX's trailing range are rendered FROM DATA so the
+    model cites them instead of computing a staleness duration or inventing a scale (Law 2):
+    both derive only from stored fields (generated_for + the row date; the VIX summary from
+    macro_series), so a stored bundle reproduces them exactly.
+    """
+    ref = None
+    if generated_for:
+        try:
+            ref = date.fromisoformat(str(generated_for))
+        except (TypeError, ValueError):
+            ref = None
+    trailing = trailing or {}
     lines = []
     for series_id, label in _MACRO_LABELS.items():
         row = macro.get(series_id)
-        if row:
-            lines.append(f"  {label}: {row.get('value')}  ({row.get('date')})")
-        else:
+        if not row:
             lines.append(f"  {label}: not available")
+            continue
+        obs_date = row.get("date")
+        age = ""
+        if ref and obs_date:
+            try:
+                age = f", age {(ref - date.fromisoformat(str(obs_date))).days}d"
+            except (TypeError, ValueError):
+                age = ""
+        tr = trailing.get(series_id) or {}
+        anchor = ""
+        if tr.get("low") is not None and tr.get("high") is not None:
+            anchor = (
+                f"; trailing {tr.get('window_sessions')}-session range "
+                f"{_fmt(tr.get('low'))}-{_fmt(tr.get('high'))} "
+                f"(latest at ~{tr.get('percentile')}th pctile)"
+            )
+        lines.append(f"  {label}: {row.get('value')}  ({obs_date}{age}){anchor}")
     return "MACRO (latest observation per FRED series)\n" + "\n".join(lines)
 
 
@@ -327,7 +356,11 @@ def serialize_bundle(
         "",
         _indicators_block(bundle.get("indicators") or {}),
         "",
-        _macro_block(bundle.get("macro") or {}),
+        _macro_block(
+            bundle.get("macro") or {},
+            bundle.get("generated_for"),
+            bundle.get("macro_trailing"),
+        ),
         "",
         _headlines_block(bundle.get("headlines") or [], news_top, retail_top),
         "",
