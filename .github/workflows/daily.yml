@@ -3,10 +3,8 @@ name: Daily Data
 # Weekday 20:30 UTC: IBKR Flex + Tiingo prices + locally computed indicators
 # (blueprint §3 / §6). Trade detection / round-trip pairing arrives in Phase 2.
 on:
-  # schedule disabled until the pipeline runs end-to-end; scheduled runs only
-  # fail downstream of pip right now (red mail, zero signal). Re-enable at deploy.
-  # schedule:
-  #   - cron: '30 20 * * 1-5'     # 20:30 UTC, Mon-Fri
+  schedule:
+    - cron: '30 20 * * 1-5'     # 20:30 UTC, Mon-Fri
   workflow_dispatch:             # manual trigger kept for testing
 
 jobs:
@@ -32,5 +30,9 @@ jobs:
           python-version: '3.13'
       - run: pip install -r requirements.txt
       - run: python -m ingestion.tiingo
+      # TEMPORARY — remove at Flex-retest-after-funding: the IBKR account is unfunded, so
+      # Flex can only return blind. Fail it SOFT so prices + indicators still run green daily;
+      # strip continue-on-error once funded, so a real Flex failure then surfaces red.
       - run: python -m ingestion.ibkr_flex
+        continue-on-error: true
       - run: python -m ingestion.indicators
