@@ -44,7 +44,7 @@ _MACRO_LABELS = {
     "UNRATE": "Unemployment (%)",
     "DGS10": "10Y Treasury Yield (%)",
     "T10Y2Y": "10Y-2Y Spread (pct pts)",
-    "VIXCLS": "VIX (index)",
+    "VIXCLS": "VIX (implied volatility index)",
 }
 _CAL_LABELS = {
     "fomc": "FOMC", "cpi": "CPI release", "nfp": "Jobs report (NFP)",
