@@ -62,10 +62,12 @@ FLEX_SERVICE_BASE = (
 FLEX_SEND_REQUEST_URL = f"{FLEX_SERVICE_BASE}.SendRequest"
 _FLEX_VERSION = "3"
 
-# IBKR may still be generating the statement right after SendRequest (error 1019);
-# poll a few times before giving up (§12 reliability is otherwise the shared fetcher's).
-_GENERATION_WAIT_SECONDS = 5.0
-_GENERATION_MAX_TRIES = 5
+# IBKR generates the statement on demand after SendRequest and returns error 1019
+# ("in progress") as an HTTP 200 body until ready; we poll until it is. Nothing bounds
+# this loop (the shared fetcher's 30s timeout is per HTTP call), so a ~3 min ceiling is
+# safe — the old ~25s window was shorter than IBKR's generation time. ~17 x 10s ~= 170s.
+_GENERATION_WAIT_SECONDS = 10.0
+_GENERATION_MAX_TRIES = 18
 
 # Quantity-proximity classifier thresholds (§4 / §2 item 3).
 _SLEEVE_PROXIMITY = 0.8  # a round-trip leg is qty >= 0.8 * sleeve_shares
