@@ -1,7 +1,7 @@
-# Requires Python >=3.12 (pandas-ta 0.4.71b0's minimum; works with numpy 2.x).
+# Vercel webhook function — LEAN runtime deps only (fast cold start, under the function-size cap).
+# This is the webhook's whole import closure; postgrest rides along with supabase.
+# The GitHub Actions jobs install the FULL set from requirements-jobs.txt
+# (pandas / pandas-ta / anthropic for ingestion + digest) — keep the two in sync deliberately.
 supabase
 httpx
 python-dotenv
-pandas
-pandas-ta>=0.4.71b0
-anthropic

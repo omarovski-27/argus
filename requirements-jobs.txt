@@ -1,0 +1,7 @@
+# Requires Python >=3.12 (pandas-ta 0.4.71b0's minimum; works with numpy 2.x).
+supabase
+httpx
+python-dotenv
+pandas
+pandas-ta>=0.4.71b0
+anthropic
