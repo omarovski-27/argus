@@ -48,6 +48,10 @@ CONFIG: dict[str, object] = {
     "bracket": {"target": 1.50, "stop": 1.50, "time_stop": "15:50 ET"},
     "phase": "A",
     "weekly_trade_cap": 2,
+    # Lead-time window for checkpoint proximity pushes (§9): warn when the next gate is
+    # within this many trades. Default 2 ≈ one week of lead at 1–2 trips/wk. Tunable row
+    # so it changes by edit, not migration (journal/checkpoint_push.py reads it, fallback 2).
+    "proximity_window": 2,
     "watchlist": ["TSLA", "SPCX", "SPY", "QQQ"],
     "kill_criteria": {
         "early_warning": {"trade": 10, "delta_shares_lt": -1.0},

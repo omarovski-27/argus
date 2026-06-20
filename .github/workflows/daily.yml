@@ -43,3 +43,10 @@ jobs:
       # round_trips.sell_ext_id migration (20260619120000) applied before the first real
       # round trip, else the first upsert fails loud — the intended signal, not a bug.
       - run: python -m journal.pairing
+      # Checkpoint proximity/verdict push: reads the freshly paired round_trips, pushes the
+      # §9 warnings (proximity within config.proximity_window; gate verdict on reach),
+      # fire-once via push_log. NOT soft-failed — a push failure must surface red (Law 7).
+      # Quiet while unfunded (trade 0 → no gate reached, next gate 10 trips off). REQUIRES
+      # the push_log migration (20260620120000) applied (table + service_role grant), else
+      # every call fails 42501 — the intended loud signal, not a bug.
+      - run: python -m journal.checkpoint_push
