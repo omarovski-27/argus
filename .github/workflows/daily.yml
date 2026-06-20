@@ -1,7 +1,7 @@
 name: Daily Data
 
-# Weekday 20:30 UTC: IBKR Flex + Tiingo prices + locally computed indicators
-# (blueprint §3 / §6). Trade detection / round-trip pairing arrives in Phase 2.
+# Weekday 20:30 UTC: IBKR Flex + Tiingo prices + locally computed indicators, then
+# Phase-2 round-trip pairing off the freshly-pulled fills (blueprint §3 / §6 / §7).
 on:
   schedule:
     - cron: '30 20 * * 1-5'     # 20:30 UTC, Mon-Fri
@@ -36,3 +36,10 @@ jobs:
       - run: python -m ingestion.ibkr_flex
         continue-on-error: true
       - run: python -m ingestion.indicators
+      # Round-trip pairing reads transactions, writes round_trips (Phase 2, journal).
+      # Runs after the Flex pull so it pairs the day's fresh fills. NOT soft-failed: the
+      # journal is the verdict (Law 6), so a pairing failure must surface red (Law 7).
+      # While the account is unfunded it derives 0 trips and stays green. REQUIRES the
+      # round_trips.sell_ext_id migration (20260619120000) applied before the first real
+      # round trip, else the first upsert fails loud — the intended signal, not a bug.
+      - run: python -m journal.pairing
