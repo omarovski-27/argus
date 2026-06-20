@@ -31,6 +31,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from bot.handlers import (  # noqa: E402 — after the sys.path bootstrap above
     handle_book,
+    handle_felt,
     handle_health,
     handle_journal,
     handle_override,
@@ -40,13 +41,14 @@ from bot.handlers import (  # noqa: E402 — after the sys.path bootstrap above
 from bot.telegram import send_message  # noqa: E402
 from shared.fetch_logger import write_fetch_log  # noqa: E402
 
-_UNKNOWN_REPLY = "Unknown command. Try /book /journal /pulse /skip /health /override"
+_UNKNOWN_REPLY = "Unknown command. Try /book /journal /felt /pulse /skip /health /override"
 
 # Command word → handler. Each handler is (message: dict) -> str.
 _COMMANDS = {
     "/pulse": handle_pulse,
     "/book": handle_book,
     "/journal": handle_journal,
+    "/felt": handle_felt,
     "/skip": handle_skip,
     "/health": handle_health,
     "/override": handle_override,

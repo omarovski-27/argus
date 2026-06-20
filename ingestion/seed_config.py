@@ -1,8 +1,10 @@
 """Argus ingestion — bootstrap seed of the pre-registered ``config`` parameters (§4, §8).
 
-Seeds the seven tunable parameters the digest's book section + the journal gates read
-at runtime: sleeve_pct, sleeve_shares, bracket, phase, weekly_trade_cap, watchlist and
-kill_criteria. No external API — these are fixed reference values, identical across
+Seeds the tunable parameters the digest's book section, the journal gates, and the
+checkpoint/annotation pushes read at runtime: sleeve_pct, sleeve_shares, bracket, phase,
+weekly_trade_cap, proximity_window, watchlist, kill_criteria, and the /felt vocabulary
+(annotation_reasons / annotation_feelings). No external API — these are fixed reference
+values, identical across
 blueprint §8 / §1.5 and the migration's ``config.value`` column comment
 (20260612175007_init_spine.sql). They are Omar's pre-registered risk limits; the values
 below are the signed-off set.
@@ -38,10 +40,9 @@ if __name__ == "__main__" and __package__ in (None, ""):
 
 from shared.db import get_client
 
-# The seven pre-registered parameters (blueprint §8 / §1.5). The JSON shapes match the
-# migration's config.value column comment exactly. value is a jsonb column, so scalars
-# (0.20, 17, "A", 2), an object (bracket, kill_criteria) and an array (watchlist) all
-# store as-is.
+# The pre-registered parameters (blueprint §8 / §1.5). The JSON shapes match the migration's
+# config.value column comment exactly. value is a jsonb column, so scalars (0.20, 17, "A", 2),
+# objects (bracket, kill_criteria) and arrays (watchlist, annotation_*) all store as-is.
 CONFIG: dict[str, object] = {
     "sleeve_pct": 0.20,
     "sleeve_shares": 17,  # auto-adjusts on splits via Corporate Actions — not hardcoded downstream
@@ -58,11 +59,15 @@ CONFIG: dict[str, object] = {
         "checkpoint": {"trade": 20, "delta_shares_lt": 0},
         "verdict": {"trade": 50, "delta_shares_lt": 0},
     },
+    # /felt annotation vocabulary (§8 Step 4) — validated in the /felt handler, stored as free
+    # text on trade_annotations. Config rows so the lists grow by edit, never a migration.
+    "annotation_reasons": ["momentum", "setup", "catalyst", "reversion", "discretionary"],
+    "annotation_feelings": ["calm", "fomo", "anxious", "revenge", "bored"],
 }
 
 
 def seed_config() -> None:
-    """Upsert the seven pre-registered parameters, idempotent on the ``key`` primary key.
+    """Upsert the pre-registered parameters, idempotent on the ``key`` primary key.
 
     Re-running is safe: existing rows are updated in place, none are duplicated. Static
     data only — no external API call. ``updated_at`` is set by the column default on the

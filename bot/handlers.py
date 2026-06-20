@@ -39,6 +39,12 @@ _DEFAULT_CHECKPOINTS: tuple[int, ...] = (10, 20, 50)
 
 # /skip reasons — must match the skip_log.reason CHECK constraint (§4 table 14).
 _SKIP_REASONS: tuple[str, ...] = ("event_filter", "discretion", "other")
+# The sleeve is TSLA-only (§8): /felt notes and their reconcile are TSLA-implicit.
+_SLEEVE_SYMBOL = "TSLA"
+# /felt vocabulary fallbacks (§8 Step 4) — used when config.annotation_* is unseeded; the live
+# lists are config rows (grow by edit, not migration), mirroring the _DEFAULT_* convention.
+_DEFAULT_REASONS: tuple[str, ...] = ("momentum", "setup", "catalyst", "reversion", "discretionary")
+_DEFAULT_FEELINGS: tuple[str, ...] = ("calm", "fomo", "anxious", "revenge", "bored")
 # /override types — must match the transactions.override_type CHECK (§4 table 10).
 _OVERRIDE_TYPES: tuple[str, ...] = (
     "round_trip_sell",
@@ -233,8 +239,8 @@ def handle_journal(message: dict) -> str:
     """Render the journal view (blueprint §9): the verdict is sleeve-only Δshares.
 
     Reads all ``round_trips`` (ordered by date — the schema has no ``exec_time``),
-    ``trade_annotations`` (confidence for the last 10), and ``config`` (phase,
-    kill_criteria). ``message`` is unused — ``/journal`` takes no arguments.
+    ``trade_annotations`` (reason / feeling / confidence for the last 10), and ``config``
+    (phase, kill_criteria). ``message`` is unused — ``/journal`` takes no arguments.
     """
     client = get_client()
     config = _load_config()
@@ -254,18 +260,17 @@ def handle_journal(message: dict) -> str:
     next_cp = _next_checkpoint(n_trades, checkpoints)
 
     recent = trips[-10:]
-    conf_by_trip: dict[int, int] = {}
+    meta_by_trip: dict[int, dict] = {}
     if recent:
         annotations = (
             client.table("trade_annotations")
-            .select("round_trip_id,confidence_1to5")
+            .select("round_trip_id,confidence_1to5,reason,feeling")
             .in_("round_trip_id", [row["id"] for row in recent])
             .execute()
             .data
         )
         for row in annotations:
-            if row.get("confidence_1to5") is not None:
-                conf_by_trip[row["round_trip_id"]] = row["confidence_1to5"]
+            meta_by_trip[row["round_trip_id"]] = row
 
     lines = [f"*Journal* — phase {phase}", ""]
     lines.append(
@@ -275,11 +280,15 @@ def handle_journal(message: dict) -> str:
     if recent:
         lines.append("*Last 10 round trips*")
         for row in reversed(recent):  # most recent first
-            conf = conf_by_trip.get(row["id"])
+            meta = meta_by_trip.get(row["id"]) or {}
+            # reason/feeling are free text — code-span them so a Markdown special can't 400 the send.
+            tag = "/".join(_code(p) for p in (meta.get("reason"), meta.get("feeling")) if p)
+            tag_str = f" · {tag}" if tag else ""
+            conf = meta.get("confidence_1to5")
             conf_str = f" · conf {conf}/5" if conf is not None else ""
             lines.append(
                 f"• {row['date']} {row['symbol']}: "
-                f"P&L {_money(_to_float(row.get('pnl_usd')))} · Δ {_signed(_to_float(row.get('delta_shares')))}{conf_str}"
+                f"P&L {_money(_to_float(row.get('pnl_usd')))} · Δ {_signed(_to_float(row.get('delta_shares')))}{tag_str}{conf_str}"
             )
     else:
         lines.append("No round trips recorded yet.")
@@ -319,6 +328,115 @@ def handle_skip(message: dict) -> str:
         {"date": _utc_today().isoformat(), "reason": reason, "notes": notes}
     ).execute()
     return f"Skip logged ✓ ({_code(reason)})"
+
+
+# --------------------------------------------------------------------------- #
+# /felt — stage an in-the-moment trade annotation (reason / feeling / confidence, §8 Step 4)
+# --------------------------------------------------------------------------- #
+def _annotation_vocab(config: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """Allowed (reasons, feelings) from config; fall back to the drafts when unseeded (§8)."""
+    reasons = config.get("annotation_reasons") or list(_DEFAULT_REASONS)
+    feelings = config.get("annotation_feelings") or list(_DEFAULT_FEELINGS)
+    return [str(r).lower() for r in reasons], [str(f).lower() for f in feelings]
+
+
+def _annotation_summary(a: dict) -> str:
+    """Render an annotation as ``setup · calm · conf 4/5`` (conf omitted when absent).
+
+    reason / feeling are free text whose vocabulary grows by config edit; they are wrapped in a
+    backtick code span (like every other identifier here) so a value carrying a Markdown special
+    (``_`` / ``*``) can't produce an unbalanced entity and 400 the Telegram send (see ``_code``).
+    """
+    label = " · ".join(_code(p) for p in (a.get("reason"), a.get("feeling")) if p)
+    conf = a.get("confidence_1to5")
+    return f"{label} · conf {conf}/5" if conf is not None else label
+
+
+def parse_felt(tokens: list[str], reasons: list[str], feelings: list[str]) -> dict | str:
+    """Parse ``/felt`` args into a field dict, or a helpful usage/error string (pure, no I/O).
+
+    ``/felt <reason> <feeling> [confidence]``. reason/feeling must be in the config vocab
+    (validated here — the column is free text, so the handler is the gate, Law 3); confidence
+    is optional and must be an integer 1–5. Returns ``{reason, feeling, confidence_1to5}`` on
+    success (confidence_1to5 None when omitted), else a string the caller replies verbatim.
+    """
+    usage = (
+        "Usage: /felt <reason> <feeling> [confidence 1-5]\n"
+        f"Reasons: {', '.join(reasons)}\nFeelings: {', '.join(feelings)}"
+    )
+    if len(tokens) < 2:
+        return usage
+    reason, feeling = tokens[0].lower(), tokens[1].lower()
+    if reason not in reasons:
+        return f"Unknown reason {_code(reason)}. Allowed: {', '.join(reasons)}"
+    if feeling not in feelings:
+        return f"Unknown feeling {_code(feeling)}. Allowed: {', '.join(feelings)}"
+    confidence: int | None = None
+    if len(tokens) >= 3:
+        try:
+            confidence = int(tokens[2])
+        except ValueError:
+            return f"Confidence must be an integer 1-5 (got {_code(tokens[2])})."
+        if not 1 <= confidence <= 5:
+            return f"Confidence must be 1-5 (got {confidence})."
+    return {"reason": reason, "feeling": feeling, "confidence_1to5": confidence}
+
+
+def handle_felt(message: dict) -> str:
+    """Stage an in-the-moment trade annotation (blueprint §8 Step 4, Law 2).
+
+    Capture is LOCK-FIRST (immutable): the first ``/felt`` for the sleeve today is staged into
+    ``pending_annotations``; a second one the same UTC day is rejected (the first stands), so a
+    logged feeling can't be quietly overwritten. The note is attached to its round trip — same
+    symbol, same UTC date — by ``journal.annotation_reconcile`` after the next pairing run.
+    ``message`` carries the ``/felt`` text. On a typo, returns an error string (never raises —
+    the webhook would otherwise turn it into an 'internal error' notice).
+    """
+    config = _load_config()
+    reasons, feelings = _annotation_vocab(config)
+    tokens = (message.get("text") or "").split()[1:]  # drop the '/felt' word
+    parsed = parse_felt(tokens, reasons, feelings)
+    if isinstance(parsed, str):
+        return parsed  # usage / validation error — reply verbatim
+
+    client = get_client()
+    today_iso = _utc_today().isoformat()
+    # ANY note for the sleeve today (consumed or not) locks the day. Pending rows persist after
+    # reconcile attaches them, so matching on trade_date alone — NOT the unconsumed subset —
+    # enforces one immutable note per UTC day even after it's been attached to its trip (a later
+    # same-day /felt would otherwise be accepted and then silently dropped at reconcile). The DB
+    # partial unique index is the concurrency backstop; this read is the friendly "already" path.
+    existing = (
+        client.table("pending_annotations")
+        .select("id,reason,feeling,confidence_1to5")
+        .eq("symbol", _SLEEVE_SYMBOL)
+        .eq("trade_date", today_iso)
+        .order("created_at")
+        .limit(1)
+        .execute()
+        .data
+    ) or []
+    if existing:
+        # Lock-first: today's note is immutable. Show what's locked; do not overwrite or stage a second.
+        return (
+            f"Already logged today ✓ — {_annotation_summary(existing[0])} is locked in. "
+            "One annotation per day; that one stands."
+        )
+
+    client.table("pending_annotations").insert(
+        {
+            "symbol": _SLEEVE_SYMBOL,
+            "trade_date": today_iso,
+            "reason": parsed["reason"],
+            "feeling": parsed["feeling"],
+            "confidence_1to5": parsed["confidence_1to5"],
+        }
+    ).execute()
+    return (
+        f"Noted ✓ — {_annotation_summary(parsed)}. "
+        f"Attaches to today's {_SLEEVE_SYMBOL} round trip at the next pairing run; "
+        f"if you don't trade {_SLEEVE_SYMBOL} today it stays unattached."
+    )
 
 
 # --------------------------------------------------------------------------- #

@@ -50,3 +50,11 @@ jobs:
       # the push_log migration (20260620120000) applied (table + service_role grant), else
       # every call fails 42501 — the intended loud signal, not a bug.
       - run: python -m journal.checkpoint_push
+      # Annotation reconcile: attaches in-the-moment /felt notes (pending_annotations) to the
+      # round trips pairing just created, matching on same symbol + UTC date (Phase 2 Step 4).
+      # Runs LAST, AFTER checkpoint_push — it depends only on round_trips (from pairing), and as a
+      # newer, migration-gated step it must not be able to abort the job before the already-live
+      # verdict/proximity push runs. NOT soft-failed (Law 7). No-op while no /felt notes / no trips
+      # exist. REQUIRES migrations 20260620130000 (pending_annotations + grant) and 20260620140000
+      # (trade_annotations reason/feeling/captured_at + UNIQUE) applied, else it fails loud.
+      - run: python -m journal.annotation_reconcile
