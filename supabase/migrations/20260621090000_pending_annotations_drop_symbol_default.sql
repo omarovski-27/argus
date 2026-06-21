@@ -1,0 +1,16 @@
+-- Drop the hardcoded symbol default on pending_annotations (Law 2 / Law 3).
+--
+-- The base table (20260620130000) defined `symbol text not null default 'TSLA'`. The DEFAULT
+-- hardcodes a ticker into the schema and would silently coerce any insert that omits `symbol`
+-- into 'TSLA' — masking the bug instead of surfacing it (Law 7), and baking in a ticker the
+-- config watchlist is meant to own (Law 3; SPCX is already in scope).
+--
+-- NOT NULL is RETAINED on purpose: a missing symbol must fail loud (23502 not_null_violation),
+-- never silently default. The only writer, bot.handlers.handle_felt, already sets
+-- symbol = _SLEEVE_SYMBOL explicitly, so dropping the default changes no live insert path
+-- (annotation_reconcile only reads pending_annotations and updates consumed_round_trip_id).
+--
+-- Forward migration — NOT an edit of the applied 20260620130000 (migrations are immutable once
+-- applied). `alter column ... drop default` is a no-op when no default exists, so this is
+-- idempotent and safe to re-run.
+alter table pending_annotations alter column symbol drop default;
