@@ -1,10 +1,14 @@
 """Argus webhook — Vercel Python serverless entry for the Telegram Bot webhook.
 
 Vercel exposes the module-level ``handler`` class (a stdlib ``BaseHTTPRequestHandler``
-— Law 8: no Flask / FastAPI) as the function behind the Telegram webhook URL. Telegram
-POSTs each update here; we route the command's first word to a ``bot.handlers``
-function, send the reply via ``bot.telegram.send_message``, and ALWAYS answer Telegram
-200 — even on error — so a failing update does not trigger Telegram's retry storm.
+— Law 8: no Flask / FastAPI) as the function behind the Telegram webhook URL. Every POST is
+authenticated by two stacked checks (``bot.webhook_auth``) before any work: a shared secret
+(Telegram's ``X-Telegram-Bot-Api-Secret-Token`` header == ``TELEGRAM_WEBHOOK_SECRET``,
+fail-closed when unset) and a chat-id allowlist (``TELEGRAM_CHAT_ID``). A bad/absent secret is
+rejected hard (401, before any body read, no DB); a wrong-chat relay is ignored silently (200).
+On the authenticated owner path we route the command's first word to a ``bot.handlers``
+function, send the reply via ``bot.telegram.send_message``, and answer 200 even on error — so a
+failing update does not trigger Telegram's retry storm.
 
 Heavy work never happens here (blueprint §2 item 11 / §3): the instant commands read
 Supabase directly and reply in ~1s; ``/pulse`` only fires a ``workflow_dispatch``. Law
@@ -19,11 +23,14 @@ webhook failure is recorded as ``'failure'``.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import sys
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler
+
+from dotenv import load_dotenv
 
 # Vercel imports this module from the api/ directory; ensure the repo root is on the
 # path so the `bot` and `shared` packages resolve regardless of the runtime's cwd.
@@ -39,6 +46,7 @@ from bot.handlers import (  # noqa: E402 — after the sys.path bootstrap above
     handle_skip,
 )
 from bot.telegram import send_message  # noqa: E402
+from bot.webhook_auth import chat_ok, secret_ok  # noqa: E402
 from shared.fetch_logger import write_fetch_log  # noqa: E402
 
 _UNKNOWN_REPLY = "Unknown command. Try /book /journal /felt /pulse /skip /health /override"
@@ -82,13 +90,28 @@ class handler(BaseHTTPRequestHandler):
     """Vercel serverless handler: Telegram webhook (POST) + uptime health check (GET)."""
 
     def do_POST(self) -> None:  # noqa: N802 — stdlib API name
-        """Handle one Telegram update; ALWAYS answer 200 (failures surface via Law 7)."""
+        """Authenticate, then handle one Telegram update (Law 7: failures surface)."""
         start = time.monotonic()
         run_id = f"webhook-{uuid.uuid4().hex[:12]}"
+        load_dotenv(override=True)  # Vercel injects env (no-op there); local .env for dev/tests
+        # Layer 1 — shared secret. OUTSIDE the try and before any body read, so the reject path
+        # touches no body and no DB: a stranger flooding the URL can't run up Supabase writes.
+        # Fail-closed when TELEGRAM_WEBHOOK_SECRET is unset (reject all, never run unprotected).
+        if not secret_ok(
+            self.headers.get("X-Telegram-Bot-Api-Secret-Token"),
+            os.environ.get("TELEGRAM_WEBHOOK_SECRET"),
+        ):
+            self._respond(401, b"Unauthorized")
+            return
         try:
             length = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(length) if length else b""
             update = json.loads(body) if body else {}
+            # Layer 2 — chat allowlist. A valid Telegram delivery from any chat but ours is
+            # ignored silently (200, no reply): don't engage strangers, don't reveal the bot acts.
+            if not chat_ok(update, os.environ.get("TELEGRAM_CHAT_ID")):
+                self._respond(200, b"OK")
+                return
             message = update.get("message") or update.get("edited_message") or {}
             reply = _route(message)
             if reply:
