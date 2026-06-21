@@ -26,6 +26,11 @@ Prereq: run ``seed_instruments`` first — the SPCX rows FK to ``instruments(sym
 
 NOT seeded (no fixed date — Law 2 / Law 4 forbid inventing one):
   • SPCX Q2 / Q3 earnings (TBD; auto-resolve via Finnhub once the 8-K is filed, §15).
+    When that resolver lands, seed ONLY book symbols (config watchlist) — Finnhub's
+    earnings_calendar returns every company, and shared.event_filter arms on any
+    ``earnings`` row by type alone; a broad pull would over-block the §8 filter on
+    unrelated earnings. Book-scoped keeps type-membership ≡ §8 (else add the
+    ``event['symbol'] in book`` gate in triggers_event_filter).
   • SPCX +10% conditional unlock (close >= $175.50 on >=5 of 10 sessions
     post-Q2-earnings): undated until the Q2 anchor exists. Its ``conditional_rule``
     (see the calendar_events DDL comment) attaches to the Q2 earnings row when known;
