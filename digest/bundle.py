@@ -40,6 +40,7 @@ if __name__ == "__main__" and __package__ in (None, ""):
 from datetime import date, datetime, timedelta, timezone
 
 from shared.db import get_client
+from shared.sources import NON_DATA_SOURCES, logical_source
 
 _TRACKED: tuple[str, ...] = ("TSLA", "SPCX", "SPY", "QQQ")
 _MACRO_SERIES: tuple[str, ...] = ("DFF", "CPIAUCSL", "UNRATE", "DGS10", "T10Y2Y", "VIXCLS")
@@ -411,31 +412,21 @@ def _flex_token_health(config: dict, today: date) -> dict:
     }
 
 
-def _logical_source(label: str) -> str:
-    """Collapse a granular fetch_log label to its logical §5 source (text before ':').
-
-    Fetchers log per-ticker / per-series / per-section labels (``tiingo:TSLA``,
-    ``fred:DFF``, ``ibkr_flex:positions``); the §7 health verdict is per logical source
-    (``tiingo``, ``fred``, ``ibkr_flex``). A bare label with no ':' is its own source.
-    """
-    return label.split(":", 1)[0] if ":" in label else label
-
-
 def _aggregate_sources(fetches: list[dict]) -> list[dict]:
     """Collapse granular labels to logical §5 sources, most-recent row winning per source.
 
     Most-recent-wins is deliberate: it retires superseded sub-labels (a one-off ``av``
     aggregate row from before the fetcher switched to ``av:TSLA`` no longer outvotes the
     fresher per-ticker success) and reflects Flex's true state (the section-store failure
-    at 19:12 outranks the transport ``:get`` success at 19:08). Excludes ``pipeline:*``
-    rows — pipeline STEP outcomes, not §5 data sources: they log only on failure, dupe the
-    underlying source's status, and ``pipeline:telegram`` is an outbound push, not an input.
-    The full granular history stays in ``fetches``; this is the deduped view the verdict uses.
+    at 19:12 outranks the transport ``:get`` success at 19:08). Excludes the non-data sources
+    in ``shared.sources.NON_DATA_SOURCES`` (``pipeline:*`` step outcomes and ``telegram_webhook``,
+    the inbound command ear) — they feed no data into the digest, so they never belong in the §5
+    verdict. The full granular history stays in ``fetches``; this is the deduped view the verdict uses.
     """
     winner: dict[str, dict] = {}
     for f in fetches:
-        logical = _logical_source(f.get("source") or "(unknown)")
-        if logical == "pipeline":
+        logical = logical_source(f.get("source") or "(unknown)")
+        if logical in NON_DATA_SOURCES:
             continue
         cur = winner.get(logical)
         if cur is None or (f.get("at") or "") > (cur.get("at") or ""):

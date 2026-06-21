@@ -29,6 +29,7 @@ from dotenv import load_dotenv
 from postgrest.exceptions import APIError
 
 from shared.db import get_client
+from shared.sources import is_non_data_source
 
 # --- config-driven constants, with documented Phase-0 fallbacks ----------------- #
 # The $100K goal (§0 / §13). Read from config.target_usd when present so it stays a
@@ -488,6 +489,11 @@ def handle_health(message: dict) -> str:
     latest: dict[str, dict] = {}
     for row in rows:
         source = row.get("source") or "(unknown)"
+        # Exclude non-§5-data sources (pipeline:* steps, the telegram_webhook ear) — same verdict
+        # taxonomy the digest uses (shared.sources), so /health can't redden on a non-data source.
+        # Surviving sources still render exactly as before (raw label, no logical collapse).
+        if is_non_data_source(source):
+            continue
         if source not in latest:  # first seen in desc order == most recent
             latest[source] = row
 
