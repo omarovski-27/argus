@@ -84,22 +84,28 @@ def _use(monkeypatch, client):
 
 MSG = {"text": "/felt setup calm 4"}
 
+# config.sleeve_symbol is now a REQUIRED row (§8): /felt fails loud without it (L6) rather than
+# stamping a guessed ticker. The happy/lock/race tests seed it so they exercise the insert path;
+# the unconfigured test below asserts the refusal. (annotation_* stay unseeded → vocab falls back.)
+CFG_SEEDED = [{"key": "sleeve_symbol", "value": "TSLA"}]
+
 
 # --------------------------------------------------------------------------- #
 # handle_felt branches
 # --------------------------------------------------------------------------- #
 def test_handle_felt_happy_path_inserts_and_acks(monkeypatch):
-    client = FakeClient(config_rows=[], pending_reads=[[]])  # no existing note today
+    client = FakeClient(config_rows=CFG_SEEDED, pending_reads=[[]])  # no existing note today
     _use(monkeypatch, client)
     reply = handlers.handle_felt(MSG)
     assert reply.startswith("Noted ✓")
     assert client.inserted and client.inserted[0]["reason"] == "setup"
     assert client.inserted[0]["confidence_1to5"] == 4
+    assert client.inserted[0]["symbol"] == "TSLA"  # stamped from config, not a constant
 
 
 def test_handle_felt_lock_first_does_not_insert(monkeypatch):
     existing = {"id": 1, "reason": "momentum", "feeling": "calm", "confidence_1to5": 3}
-    client = FakeClient(config_rows=[], pending_reads=[[existing]])
+    client = FakeClient(config_rows=CFG_SEEDED, pending_reads=[[existing]])
     _use(monkeypatch, client)
     reply = handlers.handle_felt(MSG)
     assert reply.startswith("Already logged today ✓")
@@ -110,7 +116,7 @@ def test_handle_felt_race_unique_violation_returns_lock_reply(monkeypatch):
     # First read: empty (lock check passes). Insert loses the race → 23505. Re-read: the winner.
     winner = {"id": 7, "reason": "catalyst", "feeling": "fomo", "confidence_1to5": 5}
     client = FakeClient(
-        config_rows=[], pending_reads=[[], [winner]], insert_exc=_api_error("23505")
+        config_rows=CFG_SEEDED, pending_reads=[[], [winner]], insert_exc=_api_error("23505")
     )
     _use(monkeypatch, client)
     reply = handlers.handle_felt(MSG)
@@ -120,7 +126,25 @@ def test_handle_felt_race_unique_violation_returns_lock_reply(monkeypatch):
 
 def test_handle_felt_other_db_error_surfaces(monkeypatch):
     # A non-unique-violation error must NOT be swallowed (Law 7) — it propagates.
-    client = FakeClient(config_rows=[], pending_reads=[[]], insert_exc=_api_error("23503"))
+    client = FakeClient(config_rows=CFG_SEEDED, pending_reads=[[]], insert_exc=_api_error("23503"))
     _use(monkeypatch, client)
     with pytest.raises(APIError):
         handlers.handle_felt(MSG)
+
+
+def test_handle_felt_unconfigured_symbol_refuses_without_insert(monkeypatch):
+    # No config.sleeve_symbol row → fail loud (L6/L7): refuse, never stage a guessed-ticker note.
+    client = FakeClient(config_rows=[], pending_reads=[[]])
+    _use(monkeypatch, client)
+    reply = handlers.handle_felt(MSG)
+    assert "not configured" in reply.lower()  # the refusal, not a raise
+    assert client.inserted == []  # no row written under a guessed symbol
+
+
+def test_handle_felt_blank_symbol_refuses_without_insert(monkeypatch):
+    # A present-but-blank row is invalid too — must refuse, not stamp "" as the ticker.
+    client = FakeClient(config_rows=[{"key": "sleeve_symbol", "value": "  "}], pending_reads=[[]])
+    _use(monkeypatch, client)
+    reply = handlers.handle_felt(MSG)
+    assert "not configured" in reply.lower()
+    assert client.inserted == []

@@ -49,9 +49,9 @@ import uuid
 from shared.db import get_client
 from shared.fetch_logger import write_fetch_log
 
-# The sleeve is TSLA-only (§8): the round-trip strategy trades a single ticker, so the
-# Δshares view divides the cumulative dollar P&L by one price — TSLA's latest close.
-_SLEEVE_SYMBOL = "TSLA"
+# The sleeve trades a single ticker (§8), so the Δshares view divides cumulative dollar P&L
+# by one price — that symbol's latest close. The symbol is a config row (config.sleeve_symbol),
+# resolved at runtime by _load_sleeve_symbol below — never a hardcoded constant.
 
 # Sample size below which any win-rate read is statistically meaningless (§9): "10–20
 # trades = early signal only; ~40–50 needed before win-rate claims mean anything."
@@ -263,12 +263,33 @@ def _elapsed_ms(start: float) -> int:
     return int((time.monotonic() - start) * 1000)
 
 
-def _latest_close(client) -> float | None:
-    """Latest sleeve (TSLA) close from prices_eod, or None if no price row exists."""
+def _load_sleeve_symbol(client) -> str:
+    """The single sleeve ticker from ``config.sleeve_symbol`` (§8). FAIL LOUD if absent.
+
+    The Δshares metric divides cumulative P&L by THIS symbol's close (``_latest_close``),
+    so a wrong ticker silently corrupts the gate verdict (L6). There is deliberately NO
+    default: a missing/invalid row raises, and the wrapped caller (``run_checkpoint`` /
+    ``checkpoint_push.check_and_push``) surfaces it (L7) — never a guessed ticker. (Numeric
+    params like ``sleeve_shares`` may fall back to a default; a symbol may not.)
+    """
+    rows = (
+        client.table("config").select("value").eq("key", "sleeve_symbol").execute().data
+    ) or []
+    symbol = rows[0]["value"] if rows else None
+    if not isinstance(symbol, str) or not symbol.strip():
+        raise RuntimeError(
+            "config.sleeve_symbol missing or invalid — refusing to guess the sleeve ticker "
+            "(Law 6); seed config.sleeve_symbol before the checkpoint runs."
+        )
+    return symbol
+
+
+def _latest_close(client, symbol: str) -> float | None:
+    """Latest sleeve close from prices_eod for ``symbol``, or None if no price row exists."""
     rows = (
         client.table("prices_eod")
         .select("close,date")
-        .eq("symbol", _SLEEVE_SYMBOL)
+        .eq("symbol", symbol)
         .order("date", desc=True)
         .limit(1)
         .execute()
@@ -302,12 +323,13 @@ def run_checkpoint(run_id: str) -> dict:
             client.table("config").select("value").eq("key", "kill_criteria").execute().data
         ) or []
         kill_criteria = kc_rows[0]["value"] if kc_rows else {}
-        current_price = _latest_close(client)
+        sleeve_symbol = _load_sleeve_symbol(client)  # fail loud if unseeded (L6/L7)
+        current_price = _latest_close(client, sleeve_symbol)
 
         state = checkpoint_state(round_trips, kill_criteria, current_price)
 
         write_fetch_log("journal:checkpoint", run_id, "success", _elapsed_ms(start))
-        _print_state(state)
+        _print_state(state, sleeve_symbol)
         return state
     except Exception as exc:  # noqa: BLE001 — surface, never swallow (Law 7)
         write_fetch_log("journal:checkpoint", run_id, "failure", _elapsed_ms(start), str(exc))
@@ -315,7 +337,7 @@ def run_checkpoint(run_id: str) -> dict:
         raise
 
 
-def _print_state(state: dict) -> None:
+def _print_state(state: dict, symbol: str) -> None:
     """Human-readable dump of the checkpoint state for the manual run."""
     print(f"[checkpoint] {state['proximity_text']}")
     print(f"[checkpoint] {state['statistical_note']}")
@@ -323,7 +345,7 @@ def _print_state(state: dict) -> None:
     px = state["current_price"]
     print(
         f"[checkpoint] cumulative P&L ${cum:+.2f} over {state['trade_count']} trip(s)"
-        + (f" @ {_SLEEVE_SYMBOL} {px:.2f}" if px is not None else f" ({_SLEEVE_SYMBOL} price n/a)")
+        + (f" @ {symbol} {px:.2f}" if px is not None else f" ({symbol} price n/a)")
     )
     if state["at_gate"]:
         g = state["at_gate"]

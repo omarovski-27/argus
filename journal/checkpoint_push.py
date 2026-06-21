@@ -42,7 +42,7 @@ import time
 import uuid
 
 from bot.telegram import send_message
-from journal.checkpoint import _latest_close, checkpoint_state
+from journal.checkpoint import _latest_close, _load_sleeve_symbol, checkpoint_state
 from shared.db import get_client
 from shared.fetch_logger import write_fetch_log
 
@@ -170,7 +170,8 @@ def check_and_push() -> int:
             client.table("config").select("value").eq("key", "kill_criteria").execute().data
         ) or []
         kill_criteria = kc_rows[0]["value"] if kc_rows else {}
-        current_price = _latest_close(client)
+        sleeve_symbol = _load_sleeve_symbol(client)  # fail loud if unseeded (L6/L7)
+        current_price = _latest_close(client, sleeve_symbol)
         window = _proximity_window(client)
 
         state = checkpoint_state(round_trips, kill_criteria, current_price)

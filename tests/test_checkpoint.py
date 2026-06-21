@@ -12,7 +12,7 @@ from datetime import date, timedelta
 
 import pytest
 
-from journal.checkpoint import checkpoint_state
+from journal.checkpoint import _load_sleeve_symbol, checkpoint_state
 
 # The pre-registered gates, mirroring the live config.kill_criteria row (§9).
 KILL = {
@@ -208,3 +208,38 @@ def test_cumulative_and_live_share_view():
     assert state["cumulative_pnl_usd"] == pytest.approx(-4.00)
     assert state["delta_shares"] == pytest.approx(-0.01)
     assert state["trade_count"] == 2
+
+
+# --------------------------------------------------------------------------- #
+# _load_sleeve_symbol — fail loud on a missing/invalid config row (L6/L7)
+# --------------------------------------------------------------------------- #
+class _ConfigClient:
+    """Minimal fake: ``config.select('value').eq('key','sleeve_symbol')`` → ``rows``."""
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def table(self, name):
+        assert name == "config"
+        return self
+
+    def select(self, *a, **k):
+        return self
+
+    def eq(self, *a, **k):
+        return self
+
+    def execute(self):
+        return type("R", (), {"data": self._rows})()
+
+
+def test_load_sleeve_symbol_returns_seeded_value():
+    assert _load_sleeve_symbol(_ConfigClient([{"value": "TSLA"}])) == "TSLA"
+
+
+@pytest.mark.parametrize("rows", [[], [{"value": None}], [{"value": "  "}], [{"value": 17}]])
+def test_load_sleeve_symbol_fails_loud_when_missing_or_invalid(rows):
+    # Missing row, null, blank, or non-string → raise (never guess a ticker, L6). The wrapped
+    # caller (run_checkpoint / check_and_push) turns this into a surfaced fetch_log failure (L7).
+    with pytest.raises(RuntimeError, match="sleeve_symbol"):
+        _load_sleeve_symbol(_ConfigClient(rows))

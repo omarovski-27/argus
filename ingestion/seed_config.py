@@ -46,6 +46,13 @@ from shared.db import get_client
 CONFIG: dict[str, object] = {
     "sleeve_pct": 0.20,
     "sleeve_shares": 17,  # auto-adjusts on splits via Corporate Actions — not hardcoded downstream
+    # The single sleeve ticker (§8). The round-trip strategy trades ONE symbol; both the
+    # /felt write path (bot/handlers.py) and the checkpoint Δshares divisor (journal/
+    # checkpoint.py) resolve it from here. Deliberately NO downstream default: consumers
+    # FAIL LOUD when this row is missing — a guessed ticker would write a corrupt journal
+    # row / divide P&L by the wrong price (L6), strictly worse than the in-code constant it
+    # replaced. (Unlike sleeve_shares, a numeric param a default can stand in for safely.)
+    "sleeve_symbol": "TSLA",
     "bracket": {"target": 1.50, "stop": 1.50, "time_stop": "15:50 ET"},
     "phase": "A",
     "weekly_trade_cap": 2,

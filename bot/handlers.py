@@ -41,8 +41,9 @@ _DEFAULT_CHECKPOINTS: tuple[int, ...] = (10, 20, 50)
 
 # /skip reasons — must match the skip_log.reason CHECK constraint (§4 table 14).
 _SKIP_REASONS: tuple[str, ...] = ("event_filter", "discretion", "other")
-# The sleeve is TSLA-only (§8): /felt notes and their reconcile are TSLA-implicit.
-_SLEEVE_SYMBOL = "TSLA"
+# The sleeve trades a single ticker (§8); /felt stamps it onto the pending annotation. The
+# symbol is a config row (config.sleeve_symbol), resolved at runtime by _sleeve_symbol below
+# — never a hardcoded constant, and never defaulted (a guessed ticker is a corrupt note, L6).
 # /felt vocabulary fallbacks (§8 Step 4) — used when config.annotation_* is unseeded; the live
 # lists are config rows (grow by edit, not migration), mirroring the _DEFAULT_* convention.
 _DEFAULT_REASONS: tuple[str, ...] = ("momentum", "setup", "catalyst", "reversion", "discretionary")
@@ -134,6 +135,18 @@ def _load_config() -> dict[str, Any]:
     """Load all ``config`` rows into a ``{key: value}`` dict (values are native JSONB)."""
     resp = get_client().table("config").select("key,value").execute()
     return {row["key"]: row["value"] for row in (resp.data or [])}
+
+
+def _sleeve_symbol(config: dict[str, Any]) -> str | None:
+    """The single sleeve ticker from ``config.sleeve_symbol`` (§8), or None if unset/invalid.
+
+    There is deliberately NO default: the caller (``handle_felt``) must fail loud on None and
+    refuse to stage a note, never fall back to a guessed ticker — a wrong symbol is a corrupt
+    journal row (L6), strictly worse than the explicit constant this replaced. (Numeric params
+    like ``sleeve_shares`` may fall back; a symbol may not.)
+    """
+    symbol = config.get("sleeve_symbol")
+    return symbol if isinstance(symbol, str) and symbol.strip() else None
 
 
 def _checkpoints(config: dict[str, Any]) -> list[int]:
@@ -392,8 +405,8 @@ def parse_felt(tokens: list[str], reasons: list[str], feelings: list[str]) -> di
 _UNIQUE_VIOLATION = "23505"
 
 
-def _todays_note(client: Any, today_iso: str) -> dict | None:
-    """The sleeve's existing pending note for ``today_iso`` (consumed or not), or None.
+def _todays_note(client: Any, symbol: str, today_iso: str) -> dict | None:
+    """The sleeve's existing pending note for ``symbol`` on ``today_iso`` (consumed or not), or None.
 
     ANY note for the sleeve today locks the day. Pending rows persist after reconcile attaches
     them, so this matches on trade_date alone — NOT the unconsumed subset — enforcing one immutable
@@ -403,7 +416,7 @@ def _todays_note(client: Any, today_iso: str) -> dict | None:
     rows = (
         client.table("pending_annotations")
         .select("id,reason,feeling,confidence_1to5")
-        .eq("symbol", _SLEEVE_SYMBOL)
+        .eq("symbol", symbol)
         .eq("trade_date", today_iso)
         .order("created_at")
         .limit(1)
@@ -430,6 +443,15 @@ def handle_felt(message: dict) -> str:
     the webhook's 'internal error' notice); a genuine DB error still surfaces (Law 7).
     """
     config = _load_config()
+    symbol = _sleeve_symbol(config)
+    if symbol is None:
+        # Fail loud (L7), never stage a note under a guessed ticker (L6). The reply surfaces it
+        # to Omar (the sole user); the log line surfaces it in the Vercel function logs.
+        print("[felt] config.sleeve_symbol missing/invalid — annotation NOT recorded (no guessed ticker, L6).")
+        return (
+            "⚠️ Sleeve symbol not configured — annotation not recorded. "
+            "Seed `config.sleeve_symbol` before logging /felt."
+        )
     reasons, feelings = _annotation_vocab(config)
     tokens = (message.get("text") or "").split()[1:]  # drop the '/felt' word
     parsed = parse_felt(tokens, reasons, feelings)
@@ -438,14 +460,14 @@ def handle_felt(message: dict) -> str:
 
     client = get_client()
     today_iso = _utc_today().isoformat()
-    existing = _todays_note(client, today_iso)
+    existing = _todays_note(client, symbol, today_iso)
     if existing is not None:
         return _already_locked_reply(existing)  # friendly "already" path (the common case)
 
     try:
         client.table("pending_annotations").insert(
             {
-                "symbol": _SLEEVE_SYMBOL,
+                "symbol": symbol,
                 "trade_date": today_iso,
                 "reason": parsed["reason"],
                 "feeling": parsed["feeling"],
@@ -458,12 +480,12 @@ def handle_felt(message: dict) -> str:
         # the SAME friendly lock-first reply, not a webhook 'internal error' (the docstring's "never
         # raises" promise). Any other DB error must still surface (Law 7).
         if getattr(exc, "code", None) == _UNIQUE_VIOLATION:
-            return _already_locked_reply(_todays_note(client, today_iso))
+            return _already_locked_reply(_todays_note(client, symbol, today_iso))
         raise
     return (
         f"Noted ✓ — {_annotation_summary(parsed)}. "
-        f"Attaches to today's {_SLEEVE_SYMBOL} round trip at the next pairing run; "
-        f"if you don't trade {_SLEEVE_SYMBOL} today it stays unattached."
+        f"Attaches to today's {symbol} round trip at the next pairing run; "
+        f"if you don't trade {symbol} today it stays unattached."
     )
 
 
