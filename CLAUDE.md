@@ -4,12 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project state
 
-Argus is a personal portfolio-intelligence system (digest + trade journal + quant + fundamental-analysis dossiers) for a single user, Omar. **Phase 0 is underway** — the repo holds the two specification documents, a `PHASE0-TODO.md` checklist, the applied Supabase schema migration (`supabase/migrations/`), and a scaffolded Python monorepo (`ingestion/ digest/ journal/ bot/ quant/ shared/`) whose package `__init__.py` files hold only a one-line docstring — no application code is written yet. The specs are the source of truth; build from them.
+Argus is a personal portfolio-intelligence system (digest + trade journal + quant + fundamental-analysis dossiers) for a single user, Omar. **The MVP (Phases 0–2) is largely built and deployed** — see the per-phase state below. The specs remain the source of truth for *what to build*; for *what is already built*, trust `git log`, never a prose snapshot (this section included — refresh it against the log when it drifts).
 
 - `argus-blueprint.md` (v2.0, FINAL) — master spec. The single source of truth for everything in Phases 0–4.
 - `argus-analyst-module.md` (v1.0) — the Phase 5 fundamental-analysis module. Independently buildable; built **after** the MVP.
 
-Phase 0 (the spine) is in progress: the Supabase project exists and the §4 schema migration is applied to the live DB (all 16 tables), but ingestion is not yet built. See **Build phases** below.
+**Current state (as of 2026-06-21 — verify against `git log`, not this prose):**
+- **Phase 0 (spine) — done.** 16-table schema applied to the live DB; wrapped fetchers (`shared/fetcher_base.py`), Supabase client (`shared/db.py`), `fetch_log` writer (`shared/fetch_logger.py`); ingestion for Tiingo, FRED, IBKR Flex, Alpha Vantage / MarketWatch / Reddit news, locally-computed indicators; seeds for instruments, prices, calendar, and `config` (gates seeded + verified against a raw read-back).
+- **Phase 1 (digest + bot) — done.** Full pipeline (`digest/`: fetch → URL dedup → Haiku sentiment → local indicators → bundle → Sonnet 5-clause synthesis → store + frozen `bundle_json` → Telegram), plus `--dry-run`. The Vercel webhook (`api/webhook.py`) with fail-closed secret + chat-id auth (`bot/webhook_auth.py`); bot handlers `/book /journal /skip /health /override /pulse /felt` (`bot/handlers.py`); GitHub Actions `daily.yml`, `digest.yml`, `event_filter.yml`.
+- **Phase 2 (journal) — largely done.** Round-trip pairing, checkpoint engine + proximity/verdict push (`push_log` fire-once), in-the-moment `/felt` annotations + reconcile.
+- **Not built:** Phase 3 (quant), Phase 5 (analyst).
+- **External blocker (the real bottleneck, not code):** the IBKR account is **unfunded**, so Flex returns blind (soft-failed in `daily.yml`) and the journal/book run on empty data — the sleeve verdict can't accumulate until funding lands. See **Build phases** below.
 
 ## Non-negotiable invariants (the 8 Operating Laws, as code rules)
 
@@ -42,7 +47,7 @@ The database is the product; every Telegram message is a view of it. Architectur
 
 - **Trade classification is by quantity proximity.** Sleeve round-trips are ~17 shares; DCA buys are ~0.6–2 shares. `transactions.trade_type` is auto-assigned; `transactions.override_type` (nullable, set via `/override`) **always wins**. Round-trip pairing: same-day sell of qty ≥ `0.8 × sleeve_shares` followed by a similar-qty rebuy.
 - **The core metric is sleeve-only Δshares** (more shares = winning) — direction-neutral and contribution-proof. Pre-registered gates live in `config`: trade 10 (early warning), 20 (checkpoint → Phase B), 50 (verdict). See blueprint §8.
-- **`config` is JSONB rows + `updated_at`, not schema.** Parameter changes (sleeve_pct, bracket, phase, weekly cap, watchlist) are new rows for full historical auditability — never migrations, never hardcoded constants. Read these values from `config` at runtime.
+- **`config` is JSONB rows + `updated_at`, not schema.** Parameter changes (sleeve_pct, bracket, phase, weekly cap, watchlist) are config-row edits — never migrations, never hardcoded constants. Read these values from `config` at runtime. **Applied-DDL caveat:** `config` is keyed `key text primary key`, so updating a parameter *overwrites* its single row (refreshing `updated_at`) — it does NOT keep in-DB history. Historical auditability of the gates/params therefore rests on their being pinned in the git-tracked blueprint + seed (Law 6), not on config row-versions; a `config_history` table/trigger is deferred.
 - **Young-ticker indicator suppression.** SPCX listed 2026-06-12 with almost no history. `instruments.first_trade_date` drives suppression — do not compute or display an indicator that lacks enough history (no SMA50 until 50 sessions exist, etc.).
 - **Corporate Actions auto-adjust `sleeve_shares` on splits** — never hardcode the 17-share figure.
 - **SPCX conditional unlock is monitored from `prices_eod`:** close ≥ $175.50 on ≥5 of 10 sessions post-Q2-earnings arms it. SPCX calendar seed in blueprint §14.
