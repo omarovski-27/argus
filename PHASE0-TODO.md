@@ -36,4 +36,25 @@ ingestion layer is built, or a real bug appears. Tracked here so they aren't los
 - **Ref:** blueprint §0, §4 (contributions), §5.
 
 ---
+
+## Wave 3 tail — reseeder-cure remainder (deferred)
+
+Remaining items from the Wave 3 review (the `/felt`-hardening + config-drift cure, of which the
+`sleeve_symbol` config-ification was the last code change). Recorded here so the tail is tracked,
+not only in session memory. Labels are the review's own, **not** PHASE0 item numbers.
+
+- **#2 — `config.ibkr_token_expiry_date` seed (unseeded).** The Flex read-only token's expiry is
+  not seeded, so `/health` shows **"expiry unknown"** (the §7 days-to-expiry line can't compute).
+  Needs the real Flex-token expiry date, single-key upserted (never a full re-seed — see CLAUDE.md
+  re-seed hazard).
+- **#5 — stale-audit refinement.** Deferred to pre-funding (the unmatched-note audit design
+  question carried over from quarantine #2).
+- **flag-only #1 — `/health` raw vs collapsed.** `/health` renders raw source rows while the digest
+  shows the collapsed §5 verdict; reconcile the two presentations.
+- **flag-only #2 — `checkpoint_push` failure-mode split.** `journal/checkpoint_push.py` logs two
+  distinct failure modes (gate-10 integrity-undefined vs transport delivery) under one
+  `journal:checkpoint_push` source string; splittable at the logging site for cleaner Source Health
+  attribution.
+
+---
 _When an item is resolved, add the migration filename that addresses it and check it off._
