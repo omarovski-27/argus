@@ -1,16 +1,18 @@
 """Tests for the /felt annotation pipeline (pure logic only — no DB / network / Telegram).
 
-Two pure surfaces under test:
+Three pure surfaces under test:
   • ``parse_felt`` (bot/handlers.py): /felt arg parsing + vocab validation.
   • ``match_annotations`` (journal/annotation_reconcile.py): pairing staged notes to round trips
     on (symbol, UTC date), and the idempotency/self-heal property that comes from NOT excluding
     already-annotated trips.
+  • ``stale_unmatched`` (journal/annotation_reconcile.py): the Law-7 audit — unconsumed notes past
+    their trade_date with no trip (a today note is normal and not flagged).
 """
 
 from __future__ import annotations
 
 from bot.handlers import parse_felt
-from journal.annotation_reconcile import match_annotations
+from journal.annotation_reconcile import match_annotations, stale_unmatched
 
 REASONS = ["momentum", "setup", "catalyst", "reversion", "discretionary"]
 FEELINGS = ["calm", "fomo", "anxious", "revenge", "bored"]
@@ -57,6 +59,29 @@ def test_parse_felt_confidence_non_integer():
 def test_parse_felt_confidence_out_of_range():
     out = parse_felt(["setup", "calm", "6"], REASONS, FEELINGS)
     assert isinstance(out, str) and "1-5" in out
+
+
+def test_parse_felt_confidence_non_ascii_digit_rejected():
+    # int('٣') == 3 silently; the ASCII-digit gate must reject it to the documented contract.
+    out = parse_felt(["setup", "calm", "٣"], REASONS, FEELINGS)
+    assert isinstance(out, str) and "integer" in out.lower()
+
+
+def test_parse_felt_confidence_plus_sign_rejected():
+    out = parse_felt(["setup", "calm", "+3"], REASONS, FEELINGS)
+    assert isinstance(out, str) and "integer" in out.lower()
+
+
+def test_parse_felt_confidence_underscore_grouping_rejected():
+    # int('3_0') == 30 in Python; must not be silently coerced past the gate.
+    out = parse_felt(["setup", "calm", "3_0"], REASONS, FEELINGS)
+    assert isinstance(out, str) and "integer" in out.lower()
+
+
+def test_parse_felt_confidence_surrounding_space_is_split_away():
+    # ' 3 ' can't reach as one token (split() drops the spaces), but a tab-joined oddity would;
+    # assert the canonical clean integer still parses so the gate didn't over-reject.
+    assert parse_felt(["setup", "calm", "3"], REASONS, FEELINGS)["confidence_1to5"] == 3
 
 
 # --------------------------------------------------------------------------- #
@@ -132,10 +157,39 @@ def test_two_trips_one_note_annotates_earliest_trip():
 def test_self_heal_reemits_pair_for_already_annotated_trip():
     # Correction-1 property: an already-annotated trip whose note is STILL unconsumed (a crash
     # orphan) is re-matched — the matcher doesn't exclude annotated trips. The runner's
-    # ignore_duplicates upsert then no-ops and the note is finally marked consumed. So the
-    # matcher must re-emit the (note→trip) pair, not skip it.
+    # UPDATE-on-conflict upsert then rewrites identical values and the note is finally marked
+    # consumed. So the matcher must re-emit the (note→trip) pair, not skip it.
     trips = [_trip(100, "2026-03-02")]
     pending = [_note(1, "2026-03-02T20:00:00+00:00")]  # unconsumed (crash left it so)
     rows, consumed = match_annotations(trips, pending)
     assert rows and rows[0]["round_trip_id"] == 100
     assert consumed == [(1, 100)]
+
+
+# --------------------------------------------------------------------------- #
+# stale_unmatched — the Law-7 audit (a past-date note with no trip is stranded)
+# --------------------------------------------------------------------------- #
+def test_stale_unmatched_flags_past_note_with_no_trip():
+    # A note from a prior day that matched no trip (matched_ids empty) is stranded → surfaced.
+    pending = [_note(1, "2026-03-02T20:00:00+00:00", trade_date="2026-03-02")]
+    stale = stale_unmatched(pending, matched_ids=set(), today="2026-03-05")
+    assert [n["id"] for n in stale] == [1]
+
+
+def test_stale_unmatched_ignores_today_note():
+    # A note dated today that didn't match is NORMAL (may not have traded yet) — not flagged.
+    pending = [_note(1, "2026-03-05T20:00:00+00:00", trade_date="2026-03-05")]
+    assert stale_unmatched(pending, matched_ids=set(), today="2026-03-05") == []
+
+
+def test_stale_unmatched_skips_matched_notes():
+    # A past note that DID match a trip this run is consumed, not stranded.
+    pending = [_note(1, "2026-03-02T20:00:00+00:00", trade_date="2026-03-02")]
+    assert stale_unmatched(pending, matched_ids={1}, today="2026-03-05") == []
+
+
+def test_stale_unmatched_ignores_note_without_trade_date():
+    # A note with no trade_date can't be judged stale (and never matches) — never flagged.
+    # Built directly: the _note helper's ``trade_date or created_at[:10]`` can't yield a null.
+    pending = [{"id": 1, "trade_date": None, "symbol": "TSLA"}]
+    assert stale_unmatched(pending, matched_ids=set(), today="2026-03-05") == []

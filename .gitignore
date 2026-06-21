@@ -45,6 +45,13 @@ data/local/
 _bundle_dryrun.json
 *_dryrun.json
 
+# ── Local throwaway diagnostics — root-level `_name.py` scratch scripts ──────
+# Underscore-prefixed Python at the REPO ROOT is one-off local tooling (e.g. _flex_timing.py),
+# never committed: it may thread live tokens through ad-hoc httpx calls outside the wrapped,
+# token-redacting fetchers (Law 3 / §13). Root-anchored so it can't touch package __init__.py
+# (those live in subdirs) or the tracked conftest.py.
+/_*.py
+
 # ── Editor / OS cruft ────────────────────────────────────────────────
 .idea/
 .vscode/

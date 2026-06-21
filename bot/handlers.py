@@ -26,6 +26,7 @@ from typing import Any
 
 import httpx
 from dotenv import load_dotenv
+from postgrest.exceptions import APIError
 
 from shared.db import get_client
 
@@ -373,13 +374,48 @@ def parse_felt(tokens: list[str], reasons: list[str], feelings: list[str]) -> di
         return f"Unknown feeling {_code(feeling)}. Allowed: {', '.join(feelings)}"
     confidence: int | None = None
     if len(tokens) >= 3:
-        try:
-            confidence = int(tokens[2])
-        except ValueError:
-            return f"Confidence must be an integer 1-5 (got {_code(tokens[2])})."
+        token = tokens[2]
+        # ASCII digits only: bare int() also swallows '+3', ' 3 ', '3_0' (→ 30) and non-ASCII
+        # digits like '٣' (Arabic-Indic, plausible on Omar's keyboard) — silent, surprising
+        # coercion. Reject them to the documented 1-5 contract instead.
+        if not (token.isascii() and token.isdigit()):
+            return f"Confidence must be an integer 1-5 (got {_code(token)})."
+        confidence = int(token)
         if not 1 <= confidence <= 5:
             return f"Confidence must be 1-5 (got {confidence})."
     return {"reason": reason, "feeling": feeling, "confidence_1to5": confidence}
+
+
+# The Postgres unique_violation SQLSTATE — the (symbol, trade_date) index raising it is how a
+# same-day /felt that lost the read→insert race is caught (see handle_felt).
+_UNIQUE_VIOLATION = "23505"
+
+
+def _todays_note(client: Any, today_iso: str) -> dict | None:
+    """The sleeve's existing pending note for ``today_iso`` (consumed or not), or None.
+
+    ANY note for the sleeve today locks the day. Pending rows persist after reconcile attaches
+    them, so this matches on trade_date alone — NOT the unconsumed subset — enforcing one immutable
+    note per UTC day even after attachment (a later same-day /felt would otherwise be accepted and
+    then silently dropped at reconcile).
+    """
+    rows = (
+        client.table("pending_annotations")
+        .select("id,reason,feeling,confidence_1to5")
+        .eq("symbol", _SLEEVE_SYMBOL)
+        .eq("trade_date", today_iso)
+        .order("created_at")
+        .limit(1)
+        .execute()
+        .data
+    ) or []
+    return rows[0] if rows else None
+
+
+def _already_locked_reply(note: dict | None) -> str:
+    """The friendly lock-first reply: today's note is immutable; show what's locked."""
+    locked = f"{_annotation_summary(note)} is locked in. " if note else ""
+    return f"Already logged today ✓ — {locked}One annotation per day; that one stands."
 
 
 def handle_felt(message: dict) -> str:
@@ -389,8 +425,8 @@ def handle_felt(message: dict) -> str:
     ``pending_annotations``; a second one the same UTC day is rejected (the first stands), so a
     logged feeling can't be quietly overwritten. The note is attached to its round trip — same
     symbol, same UTC date — by ``journal.annotation_reconcile`` after the next pairing run.
-    ``message`` carries the ``/felt`` text. On a typo, returns an error string (never raises —
-    the webhook would otherwise turn it into an 'internal error' notice).
+    ``message`` carries the ``/felt`` text. A typo or a same-day duplicate returns a string (never
+    the webhook's 'internal error' notice); a genuine DB error still surfaces (Law 7).
     """
     config = _load_config()
     reasons, feelings = _annotation_vocab(config)
@@ -401,37 +437,28 @@ def handle_felt(message: dict) -> str:
 
     client = get_client()
     today_iso = _utc_today().isoformat()
-    # ANY note for the sleeve today (consumed or not) locks the day. Pending rows persist after
-    # reconcile attaches them, so matching on trade_date alone — NOT the unconsumed subset —
-    # enforces one immutable note per UTC day even after it's been attached to its trip (a later
-    # same-day /felt would otherwise be accepted and then silently dropped at reconcile). The DB
-    # partial unique index is the concurrency backstop; this read is the friendly "already" path.
-    existing = (
-        client.table("pending_annotations")
-        .select("id,reason,feeling,confidence_1to5")
-        .eq("symbol", _SLEEVE_SYMBOL)
-        .eq("trade_date", today_iso)
-        .order("created_at")
-        .limit(1)
-        .execute()
-        .data
-    ) or []
-    if existing:
-        # Lock-first: today's note is immutable. Show what's locked; do not overwrite or stage a second.
-        return (
-            f"Already logged today ✓ — {_annotation_summary(existing[0])} is locked in. "
-            "One annotation per day; that one stands."
-        )
+    existing = _todays_note(client, today_iso)
+    if existing is not None:
+        return _already_locked_reply(existing)  # friendly "already" path (the common case)
 
-    client.table("pending_annotations").insert(
-        {
-            "symbol": _SLEEVE_SYMBOL,
-            "trade_date": today_iso,
-            "reason": parsed["reason"],
-            "feeling": parsed["feeling"],
-            "confidence_1to5": parsed["confidence_1to5"],
-        }
-    ).execute()
+    try:
+        client.table("pending_annotations").insert(
+            {
+                "symbol": _SLEEVE_SYMBOL,
+                "trade_date": today_iso,
+                "reason": parsed["reason"],
+                "feeling": parsed["feeling"],
+                "confidence_1to5": parsed["confidence_1to5"],
+            }
+        ).execute()
+    except APIError as exc:
+        # The DB unique index (pending_annotations_one_per_day_idx) is the concurrency backstop the
+        # read above can't be: a same-day /felt that LOST the read→insert race trips 23505. Render
+        # the SAME friendly lock-first reply, not a webhook 'internal error' (the docstring's "never
+        # raises" promise). Any other DB error must still surface (Law 7).
+        if getattr(exc, "code", None) == _UNIQUE_VIOLATION:
+            return _already_locked_reply(_todays_note(client, today_iso))
+        raise
     return (
         f"Noted ✓ — {_annotation_summary(parsed)}. "
         f"Attaches to today's {_SLEEVE_SYMBOL} round trip at the next pairing run; "
