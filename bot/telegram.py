@@ -63,7 +63,35 @@ def _split_message(text: str) -> list[str]:
     return chunks
 
 
-def send_message(text: str, parse_mode: str = "Markdown") -> None:
+def _post(method: str, payload: dict, token: str) -> None:
+    """POST ``payload`` to Bot API ``/<method>``; raise on failure with the token masked (§13).
+
+    Single transport choke point for every outbound Bot API call (sendMessage,
+    answerCallbackQuery, editMessageText) so the Law-7 raise and the §13 token-mask are
+    written once and can't drift between callers.
+    """
+    url = f"{TELEGRAM_API_BASE}/bot{token}/{method}"
+    try:
+        response = httpx.post(url, json=payload, timeout=_SEND_TIMEOUT_SECONDS)
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        # The token is in the URL and httpx echoes the URL in its error text; mask it
+        # before the error can reach a caller's logs / fetch_log (§13).
+        raise RuntimeError(f"Telegram {method} failed: {str(exc).replace(token, '***')}") from None
+
+
+def _require(*names: str) -> list[str]:
+    """Return the requested env values, raising once if any is unset (load .env first)."""
+    load_dotenv(override=True)
+    values = [os.environ.get(n) for n in names]
+    if not all(values):
+        raise RuntimeError(f"Missing {' / '.join(names)} (see .env.example).")
+    return values  # type: ignore[return-value]
+
+
+def send_message(
+    text: str, parse_mode: str = "Markdown", reply_markup: dict | None = None
+) -> None:
     """POST ``text`` to the Telegram Bot API ``sendMessage`` (Law 7: raise on failure).
 
     Args:
@@ -71,6 +99,8 @@ def send_message(text: str, parse_mode: str = "Markdown") -> None:
             Text longer than 4096 chars is split into multiple sequential sends.
         parse_mode: Telegram parse mode ('Markdown' default). A falsy value sends as
             plain text (the ``parse_mode`` field is omitted from the request).
+        reply_markup: optional inline-keyboard markup (the /felt button flow). Attached to
+            the LAST chunk only, so a split message shows the keyboard under its final part.
 
     Raises:
         RuntimeError: if TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID are not set, or if a
@@ -80,24 +110,47 @@ def send_message(text: str, parse_mode: str = "Markdown") -> None:
     if not text:
         return
 
-    load_dotenv(override=True)
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-    if not token or not chat_id:
-        raise RuntimeError(
-            "Missing TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID (see .env.example)."
-        )
-
-    url = f"{TELEGRAM_API_BASE}/bot{token}/sendMessage"
-    for chunk in _split_message(text):
-        payload: dict[str, str] = {"chat_id": chat_id, "text": chunk}
+    token, chat_id = _require("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
+    chunks = _split_message(text)
+    for i, chunk in enumerate(chunks):
+        payload: dict = {"chat_id": chat_id, "text": chunk}
         if parse_mode:
             payload["parse_mode"] = parse_mode
-        try:
-            response = httpx.post(url, json=payload, timeout=_SEND_TIMEOUT_SECONDS)
-            response.raise_for_status()
-        except httpx.HTTPError as exc:
-            # The token is in the URL and httpx echoes the URL in its error text;
-            # mask it before the error can reach a caller's logs / fetch_log (§13).
-            masked = str(exc).replace(token, "***")
-            raise RuntimeError(f"Telegram sendMessage failed: {masked}") from None
+        if reply_markup is not None and i == len(chunks) - 1:
+            payload["reply_markup"] = reply_markup
+        _post("sendMessage", payload, token)
+
+
+def answer_callback_query(callback_query_id: str | None) -> None:
+    """Acknowledge a button tap so Telegram stops the client's loading spinner (Law 7: raise).
+
+    No text — v1 surfaces state by editing the message in place (``edit_message_text``), not a
+    toast. A falsy id is a no-op. Mirrors ``send_message``'s token-masked raise (§13).
+    """
+    if not callback_query_id:
+        return
+    (token,) = _require("TELEGRAM_BOT_TOKEN")
+    _post("answerCallbackQuery", {"callback_query_id": callback_query_id}, token)
+
+
+def edit_message_text(
+    chat_id: object,
+    message_id: object,
+    text: str,
+    parse_mode: str = "Markdown",
+    reply_markup: dict | None = None,
+) -> None:
+    """Edit an existing message in place — morph the /felt flow to its next stage (Law 7: raise).
+
+    ``reply_markup=None`` clears the keyboard (the terminal 'Recorded ✓' / error messages drop it).
+    Empty text is a no-op (Telegram rejects it). Token masked on failure (§13).
+    """
+    if not text:
+        return
+    (token,) = _require("TELEGRAM_BOT_TOKEN")
+    payload: dict = {"chat_id": chat_id, "message_id": message_id, "text": text}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
+    _post("editMessageText", payload, token)

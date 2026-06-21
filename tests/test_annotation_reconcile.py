@@ -1,7 +1,6 @@
 """Tests for the /felt annotation pipeline (pure logic only — no DB / network / Telegram).
 
-Three pure surfaces under test:
-  • ``parse_felt`` (bot/handlers.py): /felt arg parsing + vocab validation.
+Two pure surfaces under test (the /felt button parsing/validation lives in tests/test_felt_handler.py):
   • ``match_annotations`` (journal/annotation_reconcile.py): pairing staged notes to round trips
     on (symbol, UTC date), and the idempotency/self-heal property that comes from NOT excluding
     already-annotated trips.
@@ -11,77 +10,7 @@ Three pure surfaces under test:
 
 from __future__ import annotations
 
-from bot.handlers import parse_felt
 from journal.annotation_reconcile import match_annotations, stale_unmatched
-
-REASONS = ["momentum", "setup", "catalyst", "reversion", "discretionary"]
-FEELINGS = ["calm", "fomo", "anxious", "revenge", "bored"]
-
-
-# --------------------------------------------------------------------------- #
-# parse_felt — validation + parsing
-# --------------------------------------------------------------------------- #
-def test_parse_felt_reason_feeling_only():
-    out = parse_felt(["setup", "calm"], REASONS, FEELINGS)
-    assert out == {"reason": "setup", "feeling": "calm", "confidence_1to5": None}
-
-
-def test_parse_felt_with_confidence():
-    out = parse_felt(["reversion", "anxious", "3"], REASONS, FEELINGS)
-    assert out == {"reason": "reversion", "feeling": "anxious", "confidence_1to5": 3}
-
-
-def test_parse_felt_is_case_insensitive():
-    out = parse_felt(["SETUP", "Calm"], REASONS, FEELINGS)
-    assert out == {"reason": "setup", "feeling": "calm", "confidence_1to5": None}
-
-
-def test_parse_felt_too_few_tokens_returns_usage():
-    out = parse_felt(["setup"], REASONS, FEELINGS)
-    assert isinstance(out, str) and out.startswith("Usage:")
-
-
-def test_parse_felt_bad_reason():
-    out = parse_felt(["scalp", "calm"], REASONS, FEELINGS)
-    assert isinstance(out, str) and "reason" in out.lower()
-
-
-def test_parse_felt_bad_feeling():
-    out = parse_felt(["setup", "elated"], REASONS, FEELINGS)
-    assert isinstance(out, str) and "feeling" in out.lower()
-
-
-def test_parse_felt_confidence_non_integer():
-    out = parse_felt(["setup", "calm", "high"], REASONS, FEELINGS)
-    assert isinstance(out, str) and "integer" in out.lower()
-
-
-def test_parse_felt_confidence_out_of_range():
-    out = parse_felt(["setup", "calm", "6"], REASONS, FEELINGS)
-    assert isinstance(out, str) and "1-5" in out
-
-
-def test_parse_felt_confidence_non_ascii_digit_rejected():
-    # int('٣') == 3 silently; the ASCII-digit gate must reject it to the documented contract.
-    out = parse_felt(["setup", "calm", "٣"], REASONS, FEELINGS)
-    assert isinstance(out, str) and "integer" in out.lower()
-
-
-def test_parse_felt_confidence_plus_sign_rejected():
-    out = parse_felt(["setup", "calm", "+3"], REASONS, FEELINGS)
-    assert isinstance(out, str) and "integer" in out.lower()
-
-
-def test_parse_felt_confidence_underscore_grouping_rejected():
-    # int('3_0') == 30 in Python; must not be silently coerced past the gate.
-    out = parse_felt(["setup", "calm", "3_0"], REASONS, FEELINGS)
-    assert isinstance(out, str) and "integer" in out.lower()
-
-
-def test_parse_felt_confidence_surrounding_space_is_split_away():
-    # ' 3 ' can't reach as one token (split() drops the spaces), but a tab-joined oddity would;
-    # assert the canonical clean integer still parses so the gate didn't over-reject.
-    assert parse_felt(["setup", "calm", "3"], REASONS, FEELINGS)["confidence_1to5"] == 3
 
 
 # --------------------------------------------------------------------------- #

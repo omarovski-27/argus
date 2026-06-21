@@ -45,8 +45,21 @@ def test_chat_unset_rejects():
 
 def test_chat_no_message_rejected():
     assert chat_ok({}, CHAT) is False
-    # callback_query / my_chat_member style update — no top-level message → silently ignored.
-    assert chat_ok({"callback_query": {"message": {"chat": {"id": 123456789}}}}, CHAT) is False
+    # my_chat_member / channel_post / inline_message_id tap — no message chat anywhere → ignored.
+    assert chat_ok({"my_chat_member": {"chat": {"id": 123456789}}}, CHAT) is False
+    assert chat_ok({"callback_query": {"id": "x", "data": "felt:f=calm"}}, CHAT) is False
+
+
+def test_chat_match_via_callback_query():
+    # A button tap authenticates on callback_query.message.chat (the bot's own keyboard message),
+    # by the IDENTICAL chat-id compare as a typed command — owner chat → accepted.
+    tap = {"callback_query": {"id": "x", "data": "felt:f=calm", "message": {"chat": {"id": 123456789}}}}
+    assert chat_ok(tap, CHAT) is True
+
+
+def test_chat_callback_query_wrong_chat_rejected():
+    tap = {"callback_query": {"id": "x", "data": "felt:f=calm", "message": {"chat": {"id": 999999}}}}
+    assert chat_ok(tap, CHAT) is False
 
 
 def test_chat_missing_id_rejected():

@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import os
 from datetime import date, datetime, timezone
-from typing import Any
+from typing import Any, NamedTuple
 
 import httpx
 from dotenv import load_dotenv
@@ -45,9 +45,10 @@ _SKIP_REASONS: tuple[str, ...] = ("event_filter", "discretion", "other")
 # symbol is a config row (config.sleeve_symbol), resolved at runtime by _sleeve_symbol below
 # — never a hardcoded constant, and never defaulted (a guessed ticker is a corrupt note, L6).
 # /felt vocabulary fallbacks (§8 Step 4) — used when config.annotation_* is unseeded; the live
-# lists are config rows (grow by edit, not migration), mirroring the _DEFAULT_* convention.
-_DEFAULT_REASONS: tuple[str, ...] = ("momentum", "setup", "catalyst", "reversion", "discretionary")
-_DEFAULT_FEELINGS: tuple[str, ...] = ("calm", "fomo", "anxious", "revenge", "bored")
+# lists are config rows (grow by edit, not migration), mirroring the _DEFAULT_* convention. Kept
+# in sync with ingestion/seed_config.py so an unseeded fallback never shows stale words.
+_DEFAULT_REASONS: tuple[str, ...] = ("momentum", "setup", "catalyst", "reversion", "gut feel")
+_DEFAULT_FEELINGS: tuple[str, ...] = ("calm", "confident", "anxious", "scared", "fomo", "greedy")
 # /override types — must match the transactions.override_type CHECK (§4 table 10).
 _OVERRIDE_TYPES: tuple[str, ...] = (
     "round_trip_sell",
@@ -66,6 +67,22 @@ _HTTP_TIMEOUT_SECONDS = 30.0
 # every source comfortably falls inside the most recent 1000 rows (weeks of runs).
 _FETCH_LOG_SCAN = 1000
 _STATUS_MARK = {"success": "✓", "failure": "✗", "timeout": "⌛", "unavailable": "∅"}
+
+
+# --------------------------------------------------------------------------- #
+# Reply contract
+# --------------------------------------------------------------------------- #
+class Reply(NamedTuple):
+    """A handler result that carries an inline keyboard alongside its text.
+
+    Handlers may return a plain ``str`` (text-only, every command but /felt) OR a ``Reply``
+    (text + ``reply_markup``, the /felt button flow). ``api.webhook`` normalises both: for a
+    typed command it ``sendMessage``s, for a button tap it ``editMessageText``s in place. A
+    plain ``str`` is exactly the old behaviour — existing handlers are unchanged.
+    """
+
+    text: str
+    reply_markup: dict | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -367,37 +384,69 @@ def _annotation_summary(a: dict) -> str:
     return f"{label} · conf {conf}/5" if conf is not None else label
 
 
-def parse_felt(tokens: list[str], reasons: list[str], feelings: list[str]) -> dict | str:
-    """Parse ``/felt`` args into a field dict, or a helpful usage/error string (pure, no I/O).
+# /felt is a TAP flow, not typed args: callback_data accumulates the choices as
+# ``felt:f=<feeling>:r=<reason>:c=<n>`` (built one tap at a time, well under Telegram's 64-byte
+# cap). It is USER-CONTROLLABLE, so it is never trusted on the round-trip — every field is
+# re-validated against a fresh config-vocab read before the write (see _felt_cb_valid).
+_FELT_CB_PREFIX = "felt:"
 
-    ``/felt <reason> <feeling> [confidence]``. reason/feeling must be in the config vocab
-    (validated here — the column is free text, so the handler is the gate, Law 3); confidence
-    is optional and must be an integer 1–5. Returns ``{reason, feeling, confidence_1to5}`` on
-    success (confidence_1to5 None when omitted), else a string the caller replies verbatim.
-    """
-    usage = (
-        "Usage: /felt <reason> <feeling> [confidence 1-5]\n"
-        f"Reasons: {', '.join(reasons)}\nFeelings: {', '.join(feelings)}"
+
+def _kb_rows(buttons: list[dict], width: int = 3) -> dict:
+    """Wrap flat buttons into an ``inline_keyboard`` of ``width``-wide rows."""
+    return {"inline_keyboard": [buttons[i : i + width] for i in range(0, len(buttons), width)]}
+
+
+def _feeling_kb(feelings: list[str]) -> dict:
+    """Stage-1 keyboard: one button per feeling, carrying ``felt:f=<feeling>``."""
+    return _kb_rows([{"text": f, "callback_data": f"{_FELT_CB_PREFIX}f={f}"} for f in feelings])
+
+
+def _reason_kb(feeling: str, reasons: list[str]) -> dict:
+    """Stage-2 keyboard: carries the chosen feeling forward + this reason."""
+    return _kb_rows(
+        [{"text": r, "callback_data": f"{_FELT_CB_PREFIX}f={feeling}:r={r}"} for r in reasons]
     )
-    if len(tokens) < 2:
-        return usage
-    reason, feeling = tokens[0].lower(), tokens[1].lower()
-    if reason not in reasons:
-        return f"Unknown reason {_code(reason)}. Allowed: {', '.join(reasons)}"
-    if feeling not in feelings:
-        return f"Unknown feeling {_code(feeling)}. Allowed: {', '.join(feelings)}"
-    confidence: int | None = None
-    if len(tokens) >= 3:
-        token = tokens[2]
-        # ASCII digits only: bare int() also swallows '+3', ' 3 ', '3_0' (→ 30) and non-ASCII
-        # digits like '٣' (Arabic-Indic, plausible on Omar's keyboard) — silent, surprising
-        # coercion. Reject them to the documented 1-5 contract instead.
-        if not (token.isascii() and token.isdigit()):
-            return f"Confidence must be an integer 1-5 (got {_code(token)})."
-        confidence = int(token)
-        if not 1 <= confidence <= 5:
-            return f"Confidence must be 1-5 (got {confidence})."
-    return {"reason": reason, "feeling": feeling, "confidence_1to5": confidence}
+
+
+def _confidence_kb(feeling: str, reason: str) -> dict:
+    """Stage-3 keyboard: 1–5, carrying feeling + reason + this confidence."""
+    return _kb_rows(
+        [
+            {"text": str(n), "callback_data": f"{_FELT_CB_PREFIX}f={feeling}:r={reason}:c={n}"}
+            for n in range(1, 6)
+        ],
+        width=5,
+    )
+
+
+def _parse_felt_cb(data: str) -> dict[str, str]:
+    """Parse ``felt:f=…:r=…:c=…`` into a ``{f,r,c}`` subset (segments on ':', each on first '=')."""
+    out: dict[str, str] = {}
+    for segment in data[len(_FELT_CB_PREFIX) :].split(":"):
+        if "=" not in segment:
+            continue
+        key, value = segment.split("=", 1)
+        if key in ("f", "r", "c"):
+            out[key] = value
+    return out
+
+
+def _felt_cb_valid(fields: dict[str, str], reasons: list[str], feelings: list[str]) -> bool:
+    """True only if every PRESENT field is in the current vocab (f, r) / a 1–5 integer (c).
+
+    The trust boundary for the round-trip: a tampered value, or a button tapped after the vocab
+    changed mid-flow, fails here so the caller refuses to write — the wire value is never trusted
+    (the config list is the gate, Law 3, exactly as the old typed parser was).
+    """
+    if "f" in fields and fields["f"] not in feelings:
+        return False
+    if "r" in fields and fields["r"] not in reasons:
+        return False
+    if "c" in fields:
+        c = fields["c"]
+        if not (c.isascii() and c.isdigit() and 1 <= int(c) <= 5):
+            return False
+    return True
 
 
 # The Postgres unique_violation SQLSTATE — the (symbol, trade_date) index raising it is how a
@@ -432,61 +481,111 @@ def _already_locked_reply(note: dict | None) -> str:
     return f"Already logged today ✓ — {locked}One annotation per day; that one stands."
 
 
-def handle_felt(message: dict) -> str:
-    """Stage an in-the-moment trade annotation (blueprint §8 Step 4, Law 2).
+def handle_felt(message: dict) -> str | Reply:
+    """Launch the in-the-moment annotation flow as tappable buttons (blueprint §8 Step 4, Law 2).
 
-    Capture is LOCK-FIRST (immutable): the first ``/felt`` for the sleeve today is staged into
-    ``pending_annotations``; a second one the same UTC day is rejected (the first stands), so a
-    logged feeling can't be quietly overwritten. The note is attached to its round trip — same
-    symbol, same UTC date — by ``journal.annotation_reconcile`` after the next pairing run.
-    ``message`` carries the ``/felt`` text. A typo or a same-day duplicate returns a string (never
-    the webhook's 'internal error' notice); a genuine DB error still surfaces (Law 7).
+    /felt no longer parses typed args — it replies with an inline keyboard the user taps through
+    (feeling → reason → confidence), which removes the whole parse-error class. LOCK-FIRST is
+    checked UP FRONT: if today's note is already staged, reply 'already logged' WITHOUT showing
+    buttons, so the user never taps through only to hit the lock. The write happens on the final
+    (confidence) tap — see ``handle_felt_callback``. ``message`` text beyond '/felt' is ignored.
+    Returns a ``Reply`` (buttons) on the happy path, else a plain ``str`` (refusal / already-logged).
     """
     config = _load_config()
     symbol = _sleeve_symbol(config)
     if symbol is None:
-        # Fail loud (L7), never stage a note under a guessed ticker (L6). The reply surfaces it
-        # to Omar (the sole user); the log line surfaces it in the Vercel function logs.
-        print("[felt] config.sleeve_symbol missing/invalid — annotation NOT recorded (no guessed ticker, L6).")
+        # Fail loud (L7); never start a flow that would end in a guessed-ticker note (L6).
+        print("[felt] config.sleeve_symbol missing/invalid — flow not started (no guessed ticker, L6).")
         return (
-            "⚠️ Sleeve symbol not configured — annotation not recorded. "
-            "Seed `config.sleeve_symbol` before logging /felt."
+            "⚠️ Sleeve symbol not configured — can't log /felt. "
+            "Seed `config.sleeve_symbol` first."
         )
-    reasons, feelings = _annotation_vocab(config)
-    tokens = (message.get("text") or "").split()[1:]  # drop the '/felt' word
-    parsed = parse_felt(tokens, reasons, feelings)
-    if isinstance(parsed, str):
-        return parsed  # usage / validation error — reply verbatim
+    existing = _todays_note(get_client(), symbol, _utc_today().isoformat())
+    if existing is not None:
+        return _already_locked_reply(existing)  # locked up front — don't make them tap to find out
+    _reasons, feelings = _annotation_vocab(config)
+    return Reply("*How did you feel?*", _feeling_kb(feelings))
 
-    client = get_client()
-    today_iso = _utc_today().isoformat()
+
+def _record_annotation(
+    client: Any, symbol: str, today_iso: str, *, reason: str, feeling: str, confidence: int
+) -> str:
+    """Lock-first stage of the annotation — the WRITE, unchanged from the old typed path.
+
+    Re-checks the lock and leans on the ``(symbol, trade_date)`` unique index as the backstop, so a
+    stale or double final-tap is caught as 23505 → the friendly 'already logged' reply, never a
+    duplicate row or an overwrite. Returns the reply text.
+    """
     existing = _todays_note(client, symbol, today_iso)
     if existing is not None:
-        return _already_locked_reply(existing)  # friendly "already" path (the common case)
-
+        return _already_locked_reply(existing)
     try:
         client.table("pending_annotations").insert(
             {
                 "symbol": symbol,
                 "trade_date": today_iso,
-                "reason": parsed["reason"],
-                "feeling": parsed["feeling"],
-                "confidence_1to5": parsed["confidence_1to5"],
+                "reason": reason,
+                "feeling": feeling,
+                "confidence_1to5": confidence,
             }
         ).execute()
     except APIError as exc:
-        # The DB unique index (pending_annotations_one_per_day_idx) is the concurrency backstop the
-        # read above can't be: a same-day /felt that LOST the read→insert race trips 23505. Render
-        # the SAME friendly lock-first reply, not a webhook 'internal error' (the docstring's "never
-        # raises" promise). Any other DB error must still surface (Law 7).
+        # The unique index is the concurrency backstop the read can't be: a final tap that LOST the
+        # read→insert race trips 23505 → the SAME friendly lock reply, never a webhook 'internal
+        # error'. Any other DB error must still surface (Law 7).
         if getattr(exc, "code", None) == _UNIQUE_VIOLATION:
             return _already_locked_reply(_todays_note(client, symbol, today_iso))
         raise
+    summary = _annotation_summary(
+        {"reason": reason, "feeling": feeling, "confidence_1to5": confidence}
+    )
     return (
-        f"Noted ✓ — {_annotation_summary(parsed)}. "
+        f"Recorded ✓ — {summary}. "
         f"Attaches to today's {symbol} round trip at the next pairing run; "
         f"if you don't trade {symbol} today it stays unattached."
     )
+
+
+def handle_felt_callback(callback_query: dict) -> Reply | None:
+    """Advance the /felt button flow one tap; on the final tap, validate + write (§8 Step 4).
+
+    Dispatch is by the highest field present in callback_data: ``{f}`` → ask reason, ``{f,r}`` →
+    ask confidence, ``{f,r,c}`` → write. Every present field is re-validated against a FRESH config
+    vocab read — the wire value is never trusted (L3/L6). Returns a ``Reply`` to morph the message
+    in place, or ``None`` for a callback that isn't ours. Never raises on user input; only a genuine
+    DB error propagates (Law 7), surfaced by the webhook.
+    """
+    data = callback_query.get("data") or ""
+    if not data.startswith(_FELT_CB_PREFIX):
+        return None  # not a /felt tap — the webhook still answers the spinner
+    fields = _parse_felt_cb(data)
+    config = _load_config()
+    reasons, feelings = _annotation_vocab(config)
+    if not fields or not _felt_cb_valid(fields, reasons, feelings):
+        # tampered, malformed, or vocab changed mid-flow → refuse and drop the keyboard
+        return Reply("⚠️ Vocabulary changed — send /felt again.")
+
+    if "c" in fields:  # final tap: feeling + reason + confidence all present → write
+        symbol = _sleeve_symbol(config)
+        if symbol is None:
+            print("[felt] config.sleeve_symbol missing/invalid — annotation NOT recorded (L6).")
+            return Reply("⚠️ Sleeve symbol not configured — annotation not recorded.")
+        text = _record_annotation(
+            get_client(),
+            symbol,
+            _utc_today().isoformat(),
+            reason=fields["r"],
+            feeling=fields["f"],
+            confidence=int(fields["c"]),
+        )
+        return Reply(text)  # keyboard dropped — flow complete
+    if "r" in fields:  # feeling + reason chosen → ask confidence
+        return Reply(
+            f"{_code(fields['f'])} · {_code(fields['r'])} — *how confident?* (1–5)",
+            _confidence_kb(fields["f"], fields["r"]),
+        )
+    # only feeling chosen → ask reason
+    return Reply(f"{_code(fields['f'])} — *what was the reason?*", _reason_kb(fields["f"], reasons))
 
 
 # --------------------------------------------------------------------------- #

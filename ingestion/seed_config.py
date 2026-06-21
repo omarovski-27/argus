@@ -67,10 +67,29 @@ CONFIG: dict[str, object] = {
         "verdict": {"trade": 50, "delta_shares_lt": 0},
     },
     # /felt annotation vocabulary (§8 Step 4) — validated in the /felt handler, stored as free
-    # text on trade_annotations. Config rows so the lists grow by edit, never a migration.
-    "annotation_reasons": ["momentum", "setup", "catalyst", "reversion", "discretionary"],
-    "annotation_feelings": ["calm", "fomo", "anxious", "revenge", "bored"],
+    # text on trade_annotations. Config rows so the lists grow by edit, never a migration. These
+    # also label the /felt inline-keyboard buttons and ride in their callback_data, so a token may
+    # contain NO ':' or '=' (the callback_data delimiters) — enforced by _validate_vocab below.
+    "annotation_reasons": ["momentum", "setup", "catalyst", "reversion", "gut feel"],
+    "annotation_feelings": ["calm", "confident", "anxious", "scared", "fomo", "greedy"],
 }
+
+# The /felt button flow encodes the chosen reason/feeling into callback_data as
+# ``felt:f=<feeling>:r=<reason>:c=<n>``, split on ':' and '='. A vocab token carrying either
+# delimiter would silently break that parse, so reject it at the WRITE site (here and the live
+# upsert) rather than discover it as a mis-parsed tap. Spaces are fine ("gut feel").
+_CB_DELIMITERS = (":", "=")
+
+
+def _validate_vocab(config: dict[str, object]) -> None:
+    """Raise if any annotation vocab token contains a callback_data delimiter (':' or '=')."""
+    for key in ("annotation_reasons", "annotation_feelings"):
+        for token in config.get(key, []) or []:
+            if any(d in str(token) for d in _CB_DELIMITERS):
+                raise ValueError(
+                    f"config.{key} token {token!r} contains a ':' or '=' — these are /felt "
+                    "callback_data delimiters and would break button parsing. Reword it."
+                )
 
 
 def seed_config() -> None:
@@ -80,6 +99,7 @@ def seed_config() -> None:
     data only — no external API call. ``updated_at`` is set by the column default on the
     bootstrap insert (see the module docstring on the deferred history path).
     """
+    _validate_vocab(CONFIG)  # fail before any write if a vocab token would break callback parsing
     client = get_client()
     rows = [{"key": k, "value": v} for k, v in CONFIG.items()]
     client.table("config").upsert(rows, on_conflict="key").execute()

@@ -37,15 +37,21 @@ from dotenv import load_dotenv
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from bot.handlers import (  # noqa: E402 — after the sys.path bootstrap above
+    Reply,
     handle_book,
     handle_felt,
+    handle_felt_callback,
     handle_health,
     handle_journal,
     handle_override,
     handle_pulse,
     handle_skip,
 )
-from bot.telegram import send_message  # noqa: E402
+from bot.telegram import (  # noqa: E402
+    answer_callback_query,
+    edit_message_text,
+    send_message,
+)
 from bot.webhook_auth import chat_ok, secret_ok  # noqa: E402
 from shared.fetch_logger import write_fetch_log  # noqa: E402
 
@@ -63,12 +69,13 @@ _COMMANDS = {
 }
 
 
-def _route(message: dict) -> str | None:
+def _route(message: dict) -> str | Reply | None:
     """Route a Telegram message to a handler; return its reply, or None to stay silent.
 
-    None means 'nothing to do' (no text — e.g. a photo or a button callback); the
-    webhook then 200s without sending, rather than replying 'unknown command' to every
-    non-command update. A text that is not a known command gets the help reply.
+    None means 'nothing to do' (no text — e.g. a photo); the webhook then 200s without sending,
+    rather than replying 'unknown command' to every non-command update. A text that is not a known
+    command gets the help reply. A handler returns a plain ``str`` (text-only) or a ``Reply`` (text
+    + inline keyboard, the /felt flow) — ``_send_reply`` handles both.
     """
     text = (message.get("text") or "").strip()
     if not text:
@@ -79,6 +86,32 @@ def _route(message: dict) -> str | None:
     if handler_fn is None:
         return _UNKNOWN_REPLY
     return handler_fn(message)
+
+
+def _send_reply(reply: str | Reply) -> None:
+    """Send a handler reply via ``sendMessage`` — plain text, or text + inline keyboard."""
+    if isinstance(reply, Reply):
+        send_message(reply.text, reply_markup=reply.reply_markup)
+    else:
+        send_message(reply)
+
+
+def _handle_callback(callback_query: dict) -> None:
+    """Advance a /felt button tap: compute the next stage, ack the tap, morph the message in place.
+
+    ``answer_callback_query`` ALWAYS fires (even when there's nothing to edit) so the client's
+    loading spinner stops. A ``Reply`` is applied with ``editMessageText`` against the tapped
+    message; ``None`` (a callback that isn't ours) just gets the ack.
+    """
+    result = handle_felt_callback(callback_query)
+    answer_callback_query(callback_query.get("id"))
+    if result is None:
+        return
+    msg = callback_query.get("message") or {}
+    chat_id = (msg.get("chat") or {}).get("id")
+    message_id = msg.get("message_id")
+    if chat_id is not None and message_id is not None:
+        edit_message_text(chat_id, message_id, result.text, reply_markup=result.reply_markup)
 
 
 def _elapsed_ms(start: float) -> int:
@@ -112,10 +145,15 @@ class handler(BaseHTTPRequestHandler):
             if not chat_ok(update, os.environ.get("TELEGRAM_CHAT_ID")):
                 self._respond(200, b"OK")
                 return
-            message = update.get("message") or update.get("edited_message") or {}
-            reply = _route(message)
-            if reply:
-                send_message(reply)
+            # A button tap (callback_query) advances the /felt flow in place; everything else routes
+            # by its command word. chat_ok above already authenticated whichever shape this is.
+            if update.get("callback_query"):
+                _handle_callback(update["callback_query"])
+            else:
+                message = update.get("message") or update.get("edited_message") or {}
+                reply = _route(message)
+                if reply:
+                    _send_reply(reply)
         except Exception as exc:  # noqa: BLE001 — surface, never swallow (Law 7)
             self._log_and_notify(run_id, _elapsed_ms(start), exc)
         self._respond(200, b"OK")
