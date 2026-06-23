@@ -287,11 +287,19 @@ def _book_block(bundle: dict) -> str:
         if g.get("trade")
     )
     cap = cfg.get("weekly_trade_cap")
+    # sleeve_shares is the registered unit, derived & frozen at sleeve entry (§8). Absent =
+    # no active sleeve yet — render that honestly rather than "None shares" (L2/L7).
+    ss = cfg.get("sleeve_shares")
+    sleeve_unit = (
+        f"{ss} shares (registered unit; sleeve_pct {_pct(cfg.get('sleeve_pct'))})"
+        if ss is not None
+        else f"no active sleeve (sleeve_pct {_pct(cfg.get('sleeve_pct'))}, derived at entry)"
+    )
     lines = [
         f"  {pos_line}",
         f"  Round trips this week: {used} / {cap} (weekly cap).",
         f"  Cumulative sleeve Δshares: {rt.get('cumulative_delta_shares')}.",
-        f"  Sleeve: {cfg.get('sleeve_shares')} shares (sleeve {_pct(cfg.get('sleeve_pct'))}); phase {cfg.get('phase')}.",
+        f"  Sleeve: {sleeve_unit}; phase {cfg.get('phase')}.",
         f"  Pre-registered gates: {gate_line}.",
     ]
     return "BOOK (core untouchable; sleeve-only metrics)\n" + "\n".join(lines)

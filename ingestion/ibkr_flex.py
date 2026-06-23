@@ -23,8 +23,9 @@ all three sections as ``unavailable`` and re-raises, because a Flex failure blin
 the journal (§12 critical alert).
 
 Trade classification (§4 / §2 item 3): by quantity proximity to the sleeve size,
-read from ``config.sleeve_shares`` at runtime (never hardcoded — Corporate Actions
-auto-adjust it on splits, §4). Sleeve-sized legs -> round_trip_*; DCA-sized buys ->
+read from ``config.sleeve_shares`` at runtime (never hardcoded, never seeded — derived
+at sleeve entry and frozen, §8; absent = no active sleeve). Sleeve-sized legs ->
+round_trip_*; DCA-sized buys ->
 dca_*; the rest -> unclassified. /override always wins later (§4). Same-day
 sell->rebuy *pairing* into ``round_trips`` is Phase 2 (journal), not done here.
 
@@ -72,7 +73,6 @@ _GENERATION_MAX_TRIES = 18
 # Quantity-proximity classifier thresholds (§4 / §2 item 3).
 _SLEEVE_PROXIMITY = 0.8  # a round-trip leg is qty >= 0.8 * sleeve_shares
 _DCA_MAX_QTY = 2.0       # DCA buys are ~0.6-2 shares
-_DEFAULT_SLEEVE_SHARES = 17.0  # fallback only when config.sleeve_shares is unseeded (§8)
 
 # fetch_log source labels — one per section per run (Law 7).
 _SECTIONS = ("ibkr_flex:positions", "ibkr_flex:trades", "ibkr_flex:cash")
@@ -129,18 +129,18 @@ def _flex_datetime(value: str | None) -> str | None:
 # --------------------------------------------------------------------------- #
 # Classification
 # --------------------------------------------------------------------------- #
-def _load_sleeve_shares(run_id: str) -> float:
-    """Read ``config.sleeve_shares`` at runtime; fall back to the §8 default of 17.
+def _load_sleeve_shares(run_id: str) -> float | None:
+    """Read ``config.sleeve_shares`` at runtime — the registered sleeve unit, or None.
 
-    Never hardcoded as a constant in trade logic: Corporate Actions auto-adjust the
-    share count on splits and write a new ``config`` row (§4). Two fallback paths,
-    deliberately distinguished:
-
-    * config *unseeded* (no row yet) — a legitimate Phase-0 state; the documented
-      default of 17 applies silently.
-    * config read *raises* — a real failure that must not silently change trade
-      classification. It is logged to ``fetch_log`` first (Law 7: surface it, never
-      swallow) so a config outage that altered classification leaves a DB trace.
+    sleeve_shares is never hardcoded and never seeded: it is derived at sleeve entry
+    (``floor(sleeve_pct × portfolio_value ÷ price)``), frozen as the registered unit, and
+    re-derived only at a phase gate (blueprint §2.2b / §8). Returns None — meaning "no
+    active sleeve" — when the row is absent: a valid pre-entry state in which the classifier
+    simply finds no round-trip legs. A config read that *raises* is a real failure: it is
+    logged to ``fetch_log`` first (Law 7 — surface it, never swallow), then also treated as
+    "no active sleeve" so a transient config blip degrades classification (advisory; /override
+    wins, pairing is Phase 2) rather than blinding the whole Flex pull. Either way the DB
+    trace is there — there is deliberately NO silent numeric default to inherit.
     """
     start = time.monotonic()
     try:
@@ -154,25 +154,27 @@ def _load_sleeve_shares(run_id: str) -> float:
         )
     except Exception as exc:  # noqa: BLE001 — surface, never swallow (Law 7)
         write_fetch_log("ibkr_flex:config", run_id, "failure", _elapsed_ms(start), str(exc))
-        print(f"[ibkr_flex] config.sleeve_shares read FAILED ({exc}); using default {_DEFAULT_SLEEVE_SHARES}.")
-        return _DEFAULT_SLEEVE_SHARES
+        print(f"[ibkr_flex] config.sleeve_shares read FAILED ({exc}); treating as no active sleeve.")
+        return None
 
     if resp.data:
         return float(resp.data[0]["value"])
-    print(f"[ibkr_flex] config.sleeve_shares unseeded; using Phase-0 default {_DEFAULT_SLEEVE_SHARES}.")
-    return _DEFAULT_SLEEVE_SHARES
+    print("[ibkr_flex] config.sleeve_shares unseeded; no active sleeve — round-trip legs left unclassified.")
+    return None
 
 
-def _classify(side: str, magnitude: float | None, sleeve_shares: float) -> str:
+def _classify(side: str, magnitude: float | None, sleeve_shares: float | None) -> str:
     """Auto-assign ``transactions.trade_type`` by quantity proximity (§4 / §2 item 3).
 
     Sleeve-sized (|qty| >= 0.8 * sleeve_shares): a sell -> 'round_trip_sell', a buy ->
     'round_trip_rebuy'. DCA-sized (|qty| <= 2): a buy -> 'dca_buy', a sell -> 'dca_sell'.
     Anything in between (or a missing/zero qty) -> 'unclassified'. /override wins later.
+    With no active sleeve (``sleeve_shares`` None/0), no leg is round-trip-sized, so sleeve-
+    sized rows fall through to 'unclassified' until a sleeve is opened.
     """
     if magnitude is None or magnitude <= 0:
         return "unclassified"
-    if sleeve_shares > 0 and magnitude >= _SLEEVE_PROXIMITY * sleeve_shares:
+    if sleeve_shares and sleeve_shares > 0 and magnitude >= _SLEEVE_PROXIMITY * sleeve_shares:
         return "round_trip_sell" if side == "sell" else "round_trip_rebuy"
     if magnitude <= _DCA_MAX_QTY:
         return "dca_buy" if side == "buy" else "dca_sell"
@@ -294,7 +296,7 @@ def _store_positions(statement: ET.Element, run_id: str, known: set[str]) -> boo
 
 
 def _store_trades(
-    statement: ET.Element, run_id: str, known: set[str], sleeve_shares: float
+    statement: ET.Element, run_id: str, known: set[str], sleeve_shares: float | None
 ) -> bool:
     """Store Trades -> ``transactions`` (auto-classified); log the section outcome."""
     start = time.monotonic()

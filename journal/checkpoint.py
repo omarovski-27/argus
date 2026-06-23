@@ -269,8 +269,8 @@ def _load_sleeve_symbol(client) -> str:
     The Δshares metric divides cumulative P&L by THIS symbol's close (``_latest_close``),
     so a wrong ticker silently corrupts the gate verdict (L6). There is deliberately NO
     default: a missing/invalid row raises, and the wrapped caller (``run_checkpoint`` /
-    ``checkpoint_push.check_and_push``) surfaces it (L7) — never a guessed ticker. (Numeric
-    params like ``sleeve_shares`` may fall back to a default; a symbol may not.)
+    ``checkpoint_push.check_and_push``) surfaces it (L7) — never a guessed ticker. (A missing
+    ``sleeve_shares`` is the benign "no active sleeve" state; a missing symbol is never benign.)
     """
     rows = (
         client.table("config").select("value").eq("key", "sleeve_symbol").execute().data

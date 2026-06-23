@@ -1,9 +1,11 @@
 """Argus ingestion — bootstrap seed of the pre-registered ``config`` parameters (§4, §8).
 
 Seeds the tunable parameters the digest's book section, the journal gates, and the
-checkpoint/annotation pushes read at runtime: sleeve_pct, sleeve_shares, bracket, phase,
+checkpoint/annotation pushes read at runtime: sleeve_pct, bracket, phase,
 weekly_trade_cap, proximity_window, watchlist, kill_criteria, and the /felt vocabulary
-(annotation_reasons / annotation_feelings). No external API — these are fixed reference
+(annotation_reasons / annotation_feelings). Note ``sleeve_shares`` is read at runtime but
+deliberately NOT seeded — it is derived & frozen at sleeve entry (see CONFIG below). No
+external API — these are fixed reference
 values, identical across
 blueprint §8 / §1.5 and the migration's ``config.value`` column comment
 (20260612175007_init_spine.sql). They are Omar's pre-registered risk limits; the values
@@ -41,17 +43,25 @@ if __name__ == "__main__" and __package__ in (None, ""):
 from shared.db import get_client
 
 # The pre-registered parameters (blueprint §8 / §1.5). The JSON shapes match the migration's
-# config.value column comment exactly. value is a jsonb column, so scalars (0.20, 17, "A", 2),
+# config.value column comment exactly. value is a jsonb column, so scalars (0.20, "A", 2),
 # objects (bracket, kill_criteria) and arrays (watchlist, annotation_*) all store as-is.
 CONFIG: dict[str, object] = {
     "sleeve_pct": 0.20,
-    "sleeve_shares": 17,  # auto-adjusts on splits via Corporate Actions — not hardcoded downstream
+    # sleeve_shares is DELIBERATELY NOT SEEDED. It is the registered unit, derived at sleeve
+    # entry — floor(sleeve_pct × live_portfolio_value ÷ price) — then frozen through the
+    # 50-trade verdict and re-derived only at a phase gate (blueprint §2.2b / §8). An absent
+    # row means "no active sleeve": a valid pre-entry state in which the Flex classifier finds
+    # no round-trip legs (graceful), while any consumer that genuinely requires the unit fails
+    # loud rather than inherit a stale figure. The old hardcoded 17 was a one-time snapshot
+    # illustration, never a live basis — seeding it would fabricate a sleeve that doesn't yet
+    # exist (L2: facts retrieved, never generated / L6).
+    #
     # The single sleeve ticker (§8). The round-trip strategy trades ONE symbol; both the
     # /felt write path (bot/handlers.py) and the checkpoint Δshares divisor (journal/
     # checkpoint.py) resolve it from here. Deliberately NO downstream default: consumers
     # FAIL LOUD when this row is missing — a guessed ticker would write a corrupt journal
-    # row / divide P&L by the wrong price (L6), strictly worse than the in-code constant it
-    # replaced. (Unlike sleeve_shares, a numeric param a default can stand in for safely.)
+    # row / divide P&L by the wrong price (L6). (sleeve_shares is likewise unseeded, but its
+    # absence is the benign "no active sleeve" state; a missing ticker is never benign.)
     "sleeve_symbol": "TSLA",
     "bracket": {"target": 1.50, "stop": 1.50, "time_stop": "15:50 ET"},
     "phase": "A",

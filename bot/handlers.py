@@ -34,7 +34,8 @@ from shared.sources import is_non_data_source
 # --- config-driven constants, with documented Phase-0 fallbacks ----------------- #
 # The $100K goal (§0 / §13). Read from config.target_usd when present so it stays a
 # tunable JSONB row (§2 item 3), not a hardcoded constant; default to the blueprint
-# figure while config is unseeded — mirrors ibkr_flex's sleeve_shares fallback.
+# figure while config is unseeded — a fixed goal a default stands in for safely (unlike
+# sleeve_shares, whose absence now means "no active sleeve", not a default-able value).
 _DEFAULT_TARGET_USD = 100_000.0
 # Pre-registered journal gates (§9). Extracted from config.kill_criteria when seeded.
 _DEFAULT_CHECKPOINTS: tuple[int, ...] = (10, 20, 50)
@@ -159,8 +160,9 @@ def _sleeve_symbol(config: dict[str, Any]) -> str | None:
 
     There is deliberately NO default: the caller (``handle_felt``) must fail loud on None and
     refuse to stage a note, never fall back to a guessed ticker — a wrong symbol is a corrupt
-    journal row (L6), strictly worse than the explicit constant this replaced. (Numeric params
-    like ``sleeve_shares`` may fall back; a symbol may not.)
+    journal row (L6), strictly worse than the explicit constant this replaced. (``sleeve_shares``
+    is likewise undefaulted now, but its absence is the benign "no active sleeve" state; a
+    missing symbol is never benign.)
     """
     symbol = config.get("sleeve_symbol")
     return symbol if isinstance(symbol, str) and symbol.strip() else None
