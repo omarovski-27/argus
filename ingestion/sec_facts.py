@@ -1,4 +1,4 @@
-"""Argus ingestion — SEC XBRL company-facts mapper (10 fundamental concepts).
+"""Argus ingestion — SEC XBRL company-facts mapper (11 fundamental concepts).
 
 Writes into the three-layer fundamentals schema (``fundamentals`` ->
 ``fundamentals_latest`` view -> ``corporate_actions``). Generalized from the proven
@@ -105,7 +105,7 @@ class Concept:
     is_split_adjustable: bool
 
 
-# The 10-concept registry. Order is purely cosmetic (report order).
+# The 11-concept registry. Order is purely cosmetic (report order).
 CONCEPTS: tuple[Concept, ...] = (
     Concept("revenue", ("Revenues",), "us-gaap", "USD", DURATION, False),
     # net_income: NetIncomeLoss only — never ProfitLoss (a different, broader tag).
@@ -123,6 +123,20 @@ CONCEPTS: tuple[Concept, ...] = (
         (
             "NetCashProvidedByUsedInOperatingActivities",
             "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations",
+        ),
+        "us-gaap",
+        "USD",
+        DURATION,
+        False,
+    ),
+    # capex: the FCF-proxy subtrahend (FCF = OCF - capex; analyst module cash-flow
+    # framework). Tesla's primary tag is PaymentsToAcquirePropertyPlantAndEquipment;
+    # the 2nd tag fills any early years filed under the broader ProductiveAssets line.
+    Concept(
+        "capex",
+        (
+            "PaymentsToAcquirePropertyPlantAndEquipment",
+            "PaymentsToAcquireProductiveAssets",
         ),
         "us-gaap",
         "USD",
