@@ -4,16 +4,19 @@ These were intentionally left OUT of the initial spine DDL (`supabase/migrations
 to keep Phase 0 scoped to blueprint §4. They are **not optional** — each must be addressed when the
 ingestion layer is built, or a real bug appears. Tracked here so they aren't lost.
 
-## 1. `corporate_actions` table (split-safety)
-- **What:** A table logging Corporate Actions from the IBKR Flex feed (splits, etc.).
-- **Why deferred:** Not in §4's table list; it belongs to the Flex Corporate Actions section
-  (§2 item 4), which arrives with ingestion.
-- **Why it matters:** §4 states "Corporate Actions feed auto-adjusts `sleeve_shares` on splits" and
-  §7 repeats it. `sleeve_shares` is the frozen registered unit (derived at sleeve entry, §8) — once
-  a sleeve is open, without capturing corporate actions that frozen count and historical
-  `round_trips.delta_shares` cannot be split-adjusted correctly — the core sleeve metric drifts.
-- **Action when building ingestion:** add `corporate_actions` (symbol, ex_date, type, ratio/factor,
-  raw_json, source) + the logic that updates `config.sleeve_shares` on a split.
+## 1. `corporate_actions` table (split-safety) — ✅ table + seed + read layer shipped; sleeve auto-adjust still deferred
+- **What:** A table logging Corporate Actions (splits, etc.) so share-basis math is correct.
+- **Shipped (2026-06/07):** the table exists live with grants
+  (`20260627120000_fundamentals_grants.sql`); TSLA's two splits seeded idempotently on
+  (symbol, action_type, effective_date) — 5:1 eff. 2020-08-31, 3:1 eff. 2022-08-25
+  (`ingestion/seed_corporate_actions.py`, 5197d91); the filed-date-keyed split-adjustment
+  read layer (`quant/splits.py`, 4b7710c) and the read-time metrics consuming it
+  (`quant/metrics.py`, dd3a448). Adjusted `shares_diluted` verified smooth:
+  1.923B (FY2015) → 3.528B (FY2025), no ×5/×15 artifacts.
+- **Still deferred (gated on funding / an active sleeve):** the IBKR Flex Corporate-Actions
+  feed ingestion and the "auto-adjust `config.sleeve_shares` on a split" write (§4/§7) —
+  moot while `sleeve_shares` is unset (no active sleeve; the stale illustration row was
+  deleted 2026-07-01).
 - **Ref:** blueprint §4 (~line 104), §2 item 4, §7.
 
 ## 2. `transactions.ext_id` (Flex dedup id)
@@ -66,6 +69,24 @@ ingestion layer is built, or a real bug appears. Tracked here so they aren't los
 - **Action (if ever needed):** an opt-in reclassify path that re-runs `_classify` on existing
   `unclassified` rows when config becomes healthy, or a manual reclassify command.
 - **Ref:** ingestion/ibkr_flex.py `_store_trades`, §2 item 3, §4 (transactions).
+
+## 6. Earnings event-filter scope (gated on the Finnhub resolver — not yet built)
+- **What:** §8's event filter must arm on "earnings of a *traded* ticker" only. Today this is a
+  non-issue: no `earnings` row ever reaches `calendar_events` — `seed_calendar.py` seeds none
+  (Law 2/4: no inventing unannounced dates), and the Finnhub earnings resolver (§5, §15) doesn't
+  exist. The `shared.event_filter` predicate arms by event *type* with no symbol gate, so its
+  `earnings` arm is currently **dormant** (cannot fire, cannot over-block).
+- **Why deferred (do NOT build the gate now):** a symbol gate would guard a code path with no live
+  code behind it (L8). The hazard only materializes when the resolver lands.
+- **Action when the resolver is built — satisfy §8 one of two ways:**
+  - **(primary)** seed earnings **book-scoped** at the fetch — config-watchlist symbols only.
+    Finnhub's `earnings_calendar` returns every company; scoping at the fetch keeps
+    type-membership ≡ §8 with **no predicate change**.
+  - **(fallback, only if a broader fetch ever lands)** add the gate the `event_filter.py` docstring
+    already anticipates: `event['symbol'] in book` inside `triggers_event_filter` — added there
+    once, both surfaces (morning push + digest Forward Calendar) inherit it.
+- **Ref:** shared/event_filter.py (predicate + docstring), ingestion/seed_calendar.py:27–33,
+  blueprint §5, §8, §15.
 
 ---
 
