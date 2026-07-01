@@ -15,6 +15,13 @@ Schema note: the applied migration keys ``config`` by ``key`` (text PK) with a `
 ``value`` and ``updated_at`` (default now()). On the bootstrap insert the default fills
 ``updated_at``; this script is a one-time bootstrap, not the runtime change path.
 
+RE-SEED GUARD (L6): once ANY config row exists, a full run REFUSES — upserting every
+key against a live table silently reverts drift (an advanced ``phase``, a derived
+``sleeve_shares``) back to these bootstrap defaults, exactly the corruption CLAUDE.md's
+re-seed hazard describes. ``--missing-only`` upserts just the seed keys the table lacks
+(live rows untouched); a deliberate one-key change stays a single-key upsert, never a
+re-seed. There is deliberately no --force.
+
 KNOWN GAP — in-DB config history (deferred to Phase 2):
     ``key`` is a PRIMARY KEY, so a parameter change is an overwrite (upsert on the key)
     and the prior value is gone. That contradicts the "new rows for full historical
@@ -102,20 +109,69 @@ def _validate_vocab(config: dict[str, object]) -> None:
                 )
 
 
-def seed_config() -> None:
-    """Upsert the pre-registered parameters, idempotent on the ``key`` primary key.
+def _plan_seed(
+    existing_keys: set[str], seed_keys: list[str], missing_only: bool
+) -> tuple[list[str], str | None]:
+    """Decide what a seed run may write: (keys_to_write, refusal_reason | None).
 
-    Re-running is safe: existing rows are updated in place, none are duplicated. Static
-    data only — no external API call. ``updated_at`` is set by the column default on the
-    bootstrap insert (see the module docstring on the deferred history path).
+    The re-seed guard (CLAUDE.md hazard / L6): against a LIVE config (any rows
+    present), a full seed silently reverts drift — an advanced ``phase``, a
+    split-adjusted ``sleeve_shares`` — back to bootstrap defaults. So:
+
+      * empty table                → bootstrap: write every seed key.
+      * rows exist, missing_only   → write ONLY the seed keys not yet present
+                                     (completes a partial seed; live rows untouched).
+      * rows exist, full seed      → REFUSE. There is deliberately no --force: a
+                                     one-key change is a single-key upsert, never a
+                                     full re-seed.
+    """
+    if not existing_keys:
+        return list(seed_keys), None
+    if missing_only:
+        return [k for k in seed_keys if k not in existing_keys], None
+    live = ", ".join(sorted(existing_keys & set(seed_keys))) or "(none of the seed keys)"
+    return [], (
+        f"config already has {len(existing_keys)} row(s) — a full re-seed would revert "
+        f"any live drift on: {live}. Refusing (L6). Use --missing-only to add only "
+        "absent keys, or a deliberate single-key upsert for a one-key change."
+    )
+
+
+def seed_config(missing_only: bool = False) -> None:
+    """Seed the pre-registered parameters — guarded against live-DB re-seeds (L6).
+
+    Bootstrap (empty ``config``) writes everything. Once any row exists, a full run
+    REFUSES (see :func:`_plan_seed`); ``missing_only=True`` upserts just the seed keys
+    the table lacks, leaving every live row untouched. Static data only — no external
+    API call. ``updated_at`` is set by the column default on insert (see the module
+    docstring on the deferred history path).
     """
     _validate_vocab(CONFIG)  # fail before any write if a vocab token would break callback parsing
     client = get_client()
-    rows = [{"key": k, "value": v} for k, v in CONFIG.items()]
+    existing = {
+        row["key"] for row in (client.table("config").select("key").execute().data or [])
+    }
+    to_write, refusal = _plan_seed(existing, list(CONFIG), missing_only)
+    if refusal:
+        raise SystemExit(f"[seed_config] {refusal}")
+    if not to_write:
+        print("[seed_config] nothing to do — every seed key already exists (live rows untouched).")
+        return
+    rows = [{"key": k, "value": CONFIG[k]} for k in to_write]
     client.table("config").upsert(rows, on_conflict="key").execute()
-    keys = ", ".join(CONFIG)
-    print(f"[seed_config] upserted {len(rows)} config keys: {keys}.")
+    mode = "missing-only" if missing_only else "bootstrap"
+    print(f"[seed_config] upserted {len(rows)} config key(s) ({mode}): {', '.join(to_write)}.")
 
 
 if __name__ == "__main__":
-    seed_config()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Seed the pre-registered config parameters.")
+    parser.add_argument(
+        "--missing-only",
+        action="store_true",
+        help="With a live config, upsert only the seed keys not yet present "
+        "(a full re-seed against live rows is refused — L6).",
+    )
+    args = parser.parse_args()
+    seed_config(missing_only=args.missing_only)
