@@ -4,7 +4,8 @@ Wires the Phase-1 data layer into a single deterministic run (Law 8: boring, no
 agentic control flow):
 
     fetch (av/marketwatch/reddit) -> compute indicators -> Haiku score new headlines ->
-    assemble frozen bundle -> Sonnet synthesis -> store digest (+bundle_json) -> Telegram
+    assemble frozen bundle -> Sonnet synthesis -> numeric grounding gate (Law 2) ->
+    store digest (+bundle_json) -> Telegram
 
 Two run types:
     'monday' / 'full'  — the full weekly digest (refresh sources, indicators, scoring).
@@ -14,8 +15,10 @@ Two run types:
 Law 7 in code: every data step is wrapped — its failure is logged to ``fetch_log`` and
 surfaced, but does NOT abort the run, so one source outage still yields a digest with a
 Source-Health gap rather than no digest at all. The critical tail (bundle -> synthesis
--> store -> Telegram) logs and RE-RAISES on failure; the +1h Monday auto-retry (§12)
-lives in the GitHub Actions schedule, not here.
+-> grounding -> store -> Telegram) logs and RE-RAISES on failure; the +1h Monday
+auto-retry (§12) lives in the GitHub Actions schedule, not here. The grounding gate
+(``digest.grounding``) sits BEFORE store: a digest citing a number not traceable to the
+serialized bundle is a Law-2 breach and must neither enter ``digests`` history nor send.
 
 LLM calls use the ``anthropic`` SDK and the Telegram push uses ``httpx`` directly —
 neither is a REST data source, so neither goes through ``shared.fetcher_base`` (which is
@@ -52,6 +55,7 @@ from dotenv import load_dotenv
 
 from digest.bundle import assemble_bundle
 from digest.dedup import get_unscored_headline_ids
+from digest.grounding import enforce_grounding
 from digest.sentiment import score_headlines
 from digest.serialize import serialize_bundle
 from ingestion.fred import fetch_macro
@@ -367,6 +371,10 @@ def run_pipeline(
         return
 
     full_text = _critical(run_id, "synthesis", lambda: synthesize(bundle))
+    # Law 2 enforcement: every number in the synthesized text must trace to the
+    # serialized bundle block. Fails loud BEFORE store/send — an ungrounded digest
+    # never enters history and never reaches Telegram (digest/grounding.py).
+    _critical(run_id, "grounding", lambda: enforce_grounding(full_text, bundle))
     _critical(run_id, "store_digest", lambda: _store_digest(run_type, full_text, bundle, run_id))
     _critical(run_id, "telegram", lambda: _send_telegram(full_text))
     print(f"[pipeline] done run_id={run_id}")
