@@ -1,0 +1,22 @@
+name: Tests
+
+# Pure-logic unit tests (no DB, no network, no secrets) on every push/PR to main.
+# The suite covers the journal engines, webhook auth, source-health taxonomy, the
+# split/metrics layers and the digest grounding gate — regressions here are exactly
+# the silent-corruption class the Operating Laws forbid, so they fail loud in CI.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - run: pip install -r requirements-jobs.txt pytest
+      - run: python -m pytest -q
