@@ -95,9 +95,10 @@ def _parse_flex_dt(value: str | None) -> datetime | None:
     """Parse the assorted IBKR Flex date/time formats into a ``datetime``.
 
     Flex emits dates in formats that vary with the query config: 'YYYYMMDD',
-    'YYYYMMDD;HHMMSS', 'YYYY-MM-DD', 'YYYY-MM-DD HH:MM:SS', or full ISO 8601
-    (optionally with 'Z' / a tz offset). Unknown shapes yield None — a null cell,
-    never a crash that drops the whole batch (Law 7).
+    'YYYYMMDD;HHMMSS', 'YYYY-MM-DD', 'YYYY-MM-DD HH:MM:SS', full ISO 8601
+    (optionally with 'Z' / a tz offset), or — as THIS account's live query is
+    configured — 'dd/MM/yyyy' ('03/07/2026;174639' = 2026-07-03). Unknown shapes
+    yield None — a null cell, never a crash that drops the whole batch (Law 7).
     """
     if not value:
         return None
@@ -106,7 +107,22 @@ def _parse_flex_dt(value: str | None) -> datetime | None:
         return datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError:
         pass
-    for fmt in ("%Y%m%d %H%M%S", "%Y%m%d", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+    for fmt in (
+        "%Y%m%d %H%M%S",
+        "%Y%m%d",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d",
+        # The live Flex query emits dd/MM/yyyy — pinned from a raw statement probed
+        # 2026-07-05: a LastBusinessDay statement carried toDate='03/07/2026' with
+        # whenGenerated='04/07/2026;174639'; only day-first reads sane. MM/dd is
+        # deliberately NOT attempted: on day<=12 values both "succeed", and a silently
+        # transposed date is a corrupt journal row (Law 6) — strictly worse than a
+        # dropped row, which the section stores flag loud (Law 7). If the Flex query
+        # is ever rebuilt, configure its date format as yyyy-MM-dd and this branch
+        # simply stops matching.
+        "%d/%m/%Y %H%M%S",
+        "%d/%m/%Y",
+    ):
         try:
             return datetime.strptime(raw, fmt)
         except ValueError:
@@ -284,10 +300,17 @@ def _store_positions(statement: ET.Element, run_id: str, known: set[str]) -> boo
             ).execute()
         if skipped:
             print(f"[ibkr_flex] positions: skipped untracked symbol(s): {sorted(skipped)}")
-        if undated:
-            print(f"[ibkr_flex] positions: skipped {undated} row(s) with unresolved date.")
-        write_fetch_log("ibkr_flex:positions", run_id, "success", _elapsed_ms(start))
         print(f"[ibkr_flex] positions: stored {len(rows)} row(s).")
+        if undated:
+            # A dropped-for-date row is missing data, not a clean pull: log the section
+            # as a FAILURE so Source Health / the red job surface it (Law 7). The silent
+            # 'success' variant hid 9 days of empty positions_snapshot (2026-06-26..07-04)
+            # while the query's dd/MM/yyyy dates resolved to None.
+            error = f"{undated} position row(s) dropped: unresolved date"
+            write_fetch_log("ibkr_flex:positions", run_id, "failure", _elapsed_ms(start), error)
+            print(f"[ibkr_flex] positions: {error}.")
+            return False
+        write_fetch_log("ibkr_flex:positions", run_id, "success", _elapsed_ms(start))
         return True
     except Exception as exc:  # noqa: BLE001 — surface the failure, never swallow it
         write_fetch_log("ibkr_flex:positions", run_id, "failure", _elapsed_ms(start), str(exc))
@@ -333,8 +356,18 @@ def _store_trades(
             ).execute()
         if skipped:
             print(f"[ibkr_flex] trades: skipped untracked symbol(s): {sorted(skipped)}")
-        write_fetch_log("ibkr_flex:trades", run_id, "success", _elapsed_ms(start))
         print(f"[ibkr_flex] trades: stored {len(rows)} transaction(s).")
+        no_exec_time = sum(1 for row in rows if row["exec_time"] is None)
+        if no_exec_time:
+            # The trade is stored (ext_id-idempotent) but an undatable exec_time means
+            # round-trip pairing can never date it — a blind journal leg (Law 6). Loud,
+            # not a green run: the 2026-06-26 first fills stored with NULL exec_time
+            # under a silent 'success'.
+            error = f"{no_exec_time} trade(s) stored without exec_time: unresolved dateTime"
+            write_fetch_log("ibkr_flex:trades", run_id, "failure", _elapsed_ms(start), error)
+            print(f"[ibkr_flex] trades: {error}.")
+            return False
+        write_fetch_log("ibkr_flex:trades", run_id, "success", _elapsed_ms(start))
         return True
     except Exception as exc:  # noqa: BLE001
         write_fetch_log("ibkr_flex:trades", run_id, "failure", _elapsed_ms(start), str(exc))
@@ -367,10 +400,15 @@ def _store_cash(statement: ET.Element, run_id: str) -> bool:
             get_client().table("contributions").upsert(
                 rows, on_conflict="ext_id", ignore_duplicates=True
             ).execute()
-        if undated:
-            print(f"[ibkr_flex] cash: skipped {undated} deposit(s) with unresolved date.")
-        write_fetch_log("ibkr_flex:cash", run_id, "success", _elapsed_ms(start))
         print(f"[ibkr_flex] cash: stored {len(rows)} contribution(s).")
+        if undated:
+            # A dropped deposit is a hole in the contribution history (Law 5 accounting):
+            # flag the section as a failure, don't scroll past it (Law 7).
+            error = f"{undated} deposit(s) dropped: unresolved date"
+            write_fetch_log("ibkr_flex:cash", run_id, "failure", _elapsed_ms(start), error)
+            print(f"[ibkr_flex] cash: {error}.")
+            return False
+        write_fetch_log("ibkr_flex:cash", run_id, "success", _elapsed_ms(start))
         return True
     except Exception as exc:  # noqa: BLE001
         write_fetch_log("ibkr_flex:cash", run_id, "failure", _elapsed_ms(start), str(exc))
