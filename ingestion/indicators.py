@@ -10,7 +10,11 @@ Computed per symbol: SMA 50, SMA 200, RSI 14, MACD line, MACD signal, MACD histo
 Young-ticker suppression (§4): a row is written only where the value is a real number.
 An indicator whose minimum period exceeds the symbol's history is skipped entirely (no
 rows), and any per-date warmup NaN is skipped — absence encodes suppression; we never
-store a NaN. SPCX (listed 2026-06-12, ~2 sessions) therefore gets no indicator rows yet.
+store a NaN. SPCX (listed 2026-06-12) accrues indicators only as history allows. Below
+its internal floor pandas_ta returns None INSTEAD of a NaN series, so ``_MIN_PERIODS``
+must sit at or above those floors, and a None that arrives anyway is suppressed by
+omission, never iterated (the 2026-07-03 Daily Data crash: SPCX's 14th session passed
+the old ``>= 14`` rsi14 guard, ``ta.rsi`` needs length+1 closes and returned None).
 
 DEVIATION FROM THE TASK BRIEF (applied schema is truth): the brief says to read the
 ``indicators.name`` CHECK constraint and only write permitted values — but the applied
@@ -41,14 +45,18 @@ from shared.db import get_client
 from shared.fetch_logger import write_fetch_log
 
 # Canonical indicator names (open set — no DB CHECK; see module docstring) and the
-# minimum number of sessions required before each yields a usable value.
+# minimum sessions before each yields a usable value. Each entry MUST be >= pandas_ta's
+# internal floor for that call — below its floor pandas_ta returns None, not a NaN
+# series: rsi needs length+1 closes (14 deltas), macd needs slow+signal-1 sessions.
+# tests/test_indicators.py pins every boundary against the installed pandas_ta, so a
+# library upgrade that moves a floor fails CI on push instead of the 20:30 UTC job.
 _MIN_PERIODS: dict[str, int] = {
     "sma50": 50,
     "sma200": 200,
-    "rsi14": 14,
-    "macd": 26,
-    "macd_signal": 26,
-    "macd_hist": 26,
+    "rsi14": 15,  # length + 1
+    "macd": 34,  # slow + signal - 1 = 26 + 9 - 1
+    "macd_signal": 34,
+    "macd_hist": 34,
 }
 
 _PAGE = 1000          # PostgREST page size for reads
@@ -103,6 +111,44 @@ def _macd_columns(macd: pd.DataFrame) -> dict[str, pd.Series]:
     return out
 
 
+def _indicator_rows(symbol: str, frame: pd.DataFrame) -> list[dict]:
+    """Indicator rows for one symbol from its cleaned, date-ascending (date, close) frame.
+
+    Pure (no I/O) so the session-count guards — the young-ticker suppression contract —
+    are unit-testable without a DB. A series pandas_ta returns as None (history under
+    its own floor despite our guard) is suppressed by omission exactly like a warmup
+    NaN, never iterated; it prints, because a guard-vs-floor divergence must be visible
+    in the job log rather than silently thinning the table (Law 7).
+    """
+    sessions = len(frame)
+    series: dict[str, pd.Series] = {}
+    if sessions >= _MIN_PERIODS["sma50"]:
+        series["sma50"] = ta.sma(frame["close"], length=50)
+    if sessions >= _MIN_PERIODS["sma200"]:
+        series["sma200"] = ta.sma(frame["close"], length=200)
+    if sessions >= _MIN_PERIODS["rsi14"]:
+        series["rsi14"] = ta.rsi(frame["close"], length=14)
+    if sessions >= _MIN_PERIODS["macd"]:
+        macd = ta.macd(frame["close"], fast=12, slow=26, signal=9)
+        if macd is not None and not macd.empty:
+            series.update(_macd_columns(macd))
+
+    rows: list[dict] = []
+    for name, values in series.items():
+        if values is None:
+            print(
+                f"[indicators] {symbol}: {name} returned None at {sessions} session(s); suppressed."
+            )
+            continue
+        for date_str, value in zip(frame["date"], values):
+            if value is None or pd.isna(value):
+                continue  # warmup NaN — write nothing rather than a NaN (§4)
+            rows.append(
+                {"symbol": symbol, "date": date_str, "name": name, "value": float(value)}
+            )
+    return rows
+
+
 def compute_indicators(run_id: str) -> None:
     """Compute indicators for every tracked symbol and upsert them into ``indicators``.
 
@@ -134,33 +180,12 @@ def compute_indicators(run_id: str) -> None:
             frame = pd.DataFrame(prices)
             frame["close"] = pd.to_numeric(frame["close"], errors="coerce")
             frame = frame.dropna(subset=["close"]).sort_values("date").reset_index(drop=True)
-            sessions = len(frame)
 
-            series: dict[str, pd.Series] = {}
-            if sessions >= _MIN_PERIODS["sma50"]:
-                series["sma50"] = ta.sma(frame["close"], length=50)
-            if sessions >= _MIN_PERIODS["sma200"]:
-                series["sma200"] = ta.sma(frame["close"], length=200)
-            if sessions >= _MIN_PERIODS["rsi14"]:
-                series["rsi14"] = ta.rsi(frame["close"], length=14)
-            if sessions >= _MIN_PERIODS["macd"]:
-                macd = ta.macd(frame["close"], fast=12, slow=26, signal=9)
-                if macd is not None and not macd.empty:
-                    series.update(_macd_columns(macd))
-
-            rows: list[dict] = []
-            for name, values in series.items():
-                for date_str, value in zip(frame["date"], values):
-                    if value is None or pd.isna(value):
-                        continue  # warmup NaN — write nothing rather than a NaN (§4)
-                    rows.append(
-                        {"symbol": symbol, "date": date_str, "name": name, "value": float(value)}
-                    )
-
+            rows = _indicator_rows(symbol, frame)
             for chunk in _chunks(rows, _UPSERT_CHUNK):
                 client.table("indicators").upsert(chunk, on_conflict="symbol,date,name").execute()
             total += len(rows)
-            print(f"[indicators] {symbol}: upserted {len(rows)} row(s) over {sessions} session(s).")
+            print(f"[indicators] {symbol}: upserted {len(rows)} row(s) over {len(frame)} session(s).")
 
         write_fetch_log("indicators", run_id, "success", _elapsed_ms(start))
         print(f"[indicators] done: {total} row(s) across {len(symbols)} symbol(s).")
