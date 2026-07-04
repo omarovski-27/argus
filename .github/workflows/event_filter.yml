@@ -30,3 +30,8 @@ jobs:
           python-version: '3.13'
       - run: pip install -r requirements-jobs.txt
       - run: python -m bot.event_filter_check
+      # Fail-loud push (Law 7 / §12): a red scheduled run must reach Telegram, not just
+      # a GitHub e-mail.
+      - name: Telegram alert on failure
+        if: failure()
+        run: python -m bot.job_alert "Event Filter Check"

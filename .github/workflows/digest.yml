@@ -37,3 +37,9 @@ jobs:
           python-version: '3.13'
       - run: pip install -r requirements-jobs.txt
       - run: python -m digest.pipeline --run-type ${{ github.event.inputs.run_type || 'monday' }}
+      # Fail-loud push (Law 7 / §12): a Monday-digest failure must reach Telegram, not
+      # just a GitHub e-mail. (If the failing step IS the Telegram send, this alert
+      # fails too and the run log / e-mail remain the fallback.)
+      - name: Telegram alert on failure
+        if: failure()
+        run: python -m bot.job_alert "Digest"

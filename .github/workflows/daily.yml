@@ -1,14 +1,18 @@
 name: Daily Data
 
-# Weekday 20:30 UTC: IBKR Flex + Tiingo prices + locally computed indicators, then
-# Phase-2 round-trip pairing off the freshly-pulled fills (blueprint §3 / §6 / §7).
+# Weekday 20:30 UTC, as two INDEPENDENT jobs so one chain's failure never starves the
+# other (2026-07-03 lesson: an indicators crash skipped the journal steps queued behind
+# it in the old single job):
+#   prices  — Tiingo EOD + locally computed indicators (blueprint §3 / §6)
+#   journal — IBKR Flex pull, then Phase-2 round-trip pairing / checkpoint push /
+#             /felt reconcile off the freshly-pulled fills (§3 / §6 / §7)
 on:
   schedule:
     - cron: '30 20 * * 1-5'     # 20:30 UTC, Mon-Fri
   workflow_dispatch:             # manual trigger kept for testing
 
 jobs:
-  run:
+  prices:
     runs-on: ubuntu-latest
     # Repo secrets consumed by the ingestion modules below (uniform across jobs).
     env:
@@ -30,31 +34,54 @@ jobs:
           python-version: '3.13'
       - run: pip install -r requirements-jobs.txt
       - run: python -m ingestion.tiingo
-      # TEMPORARY — remove at Flex-retest-after-funding: the IBKR account is unfunded, so
-      # Flex can only return blind. Fail it SOFT so prices + indicators still run green daily;
-      # strip continue-on-error once funded, so a real Flex failure then surfaces red.
-      - run: python -m ingestion.ibkr_flex
-        continue-on-error: true
       - run: python -m ingestion.indicators
+      # Fail-loud push (Law 7 / §12): a red scheduled run must reach Telegram, not just
+      # a GitHub e-mail (the 2026-07-03 failure sat unseen for two days).
+      - name: Telegram alert on failure
+        if: failure()
+        run: python -m bot.job_alert "Daily Data / prices"
+
+  journal:
+    runs-on: ubuntu-latest
+    # Repo secrets consumed by the ingestion/journal modules below (uniform across jobs).
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      TIINGO_API_KEY: ${{ secrets.TIINGO_API_KEY }}
+      ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
+      FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+      FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      IBKR_FLEX_TOKEN: ${{ secrets.IBKR_FLEX_TOKEN }}
+      IBKR_FLEX_QUERY_ID: ${{ secrets.IBKR_FLEX_QUERY_ID }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - run: pip install -r requirements-jobs.txt
+      # The account is funded and Flex is live (first fills 2026-06-26; fetch_log green
+      # since 2026-06-21), so a Flex failure is REAL missing data now: it fails hard and
+      # red (Law 7). The unfunded-era `continue-on-error` soft-fail is retired.
+      - run: python -m ingestion.ibkr_flex
       # Round-trip pairing reads transactions, writes round_trips (Phase 2, journal).
       # Runs after the Flex pull so it pairs the day's fresh fills. NOT soft-failed: the
       # journal is the verdict (Law 6), so a pairing failure must surface red (Law 7).
-      # While the account is unfunded it derives 0 trips and stays green. REQUIRES the
-      # round_trips.sell_ext_id migration (20260619120000) applied before the first real
-      # round trip, else the first upsert fails loud — the intended signal, not a bug.
       - run: python -m journal.pairing
       # Checkpoint proximity/verdict push: reads the freshly paired round_trips, pushes the
       # §9 warnings (proximity within config.proximity_window; gate verdict on reach),
       # fire-once via push_log. NOT soft-failed — a push failure must surface red (Law 7).
-      # Quiet while unfunded (trade 0 → no gate reached, next gate 10 trips off). REQUIRES
-      # the push_log migration (20260620120000) applied (table + service_role grant), else
-      # every call fails 42501 — the intended loud signal, not a bug.
       - run: python -m journal.checkpoint_push
       # Annotation reconcile: attaches in-the-moment /felt notes (pending_annotations) to the
       # round trips pairing just created, matching on same symbol + UTC date (Phase 2 Step 4).
-      # Runs LAST, AFTER checkpoint_push — it depends only on round_trips (from pairing), and as a
-      # newer, migration-gated step it must not be able to abort the job before the already-live
-      # verdict/proximity push runs. NOT soft-failed (Law 7). No-op while no /felt notes / no trips
-      # exist. REQUIRES migrations 20260620130000 (pending_annotations + grant) and 20260620140000
-      # (trade_annotations reason/feeling/captured_at + UNIQUE) applied, else it fails loud.
+      # Runs LAST, AFTER checkpoint_push — it depends only on round_trips (from pairing), and
+      # must not be able to abort the job before the already-live verdict/proximity push runs.
+      # NOT soft-failed (Law 7). No-op while no /felt notes / no trips exist.
       - run: python -m journal.annotation_reconcile
+      # Fail-loud push (Law 7 / §12): a red scheduled run must reach Telegram, not just
+      # a GitHub e-mail.
+      - name: Telegram alert on failure
+        if: failure()
+        run: python -m bot.job_alert "Daily Data / journal"
