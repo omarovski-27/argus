@@ -48,7 +48,8 @@ from shared.fetch_logger import elapsed_ms, write_fetch_log
 
 SCHEMA_VERSION = 1
 
-# The 11 concepts frozen as full split-adjusted series (Stage 2's raw material).
+# The 12 concepts frozen as full split-adjusted series (Stage 2's raw material;
+# depreciation_amortization feeds the owner-earnings base, Stage 7).
 _SERIES_CONCEPTS = (
     "revenue",
     "net_income",
@@ -59,6 +60,7 @@ _SERIES_CONCEPTS = (
     "gross_profit",
     "operating_cash_flow",
     "capex",
+    "depreciation_amortization",
     "shares_diluted",
     "shares_outstanding",
 )

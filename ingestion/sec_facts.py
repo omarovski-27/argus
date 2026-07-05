@@ -170,6 +170,19 @@ CONCEPTS: tuple[Concept, ...] = (
         DURATION,
         False,
     ),
+    # depreciation_amortization: the owner-earnings add-back (OE = NI + D&A - capex,
+    # valuation engine / module spec Stage 7). Both tags mean FULL D&A (the 2nd fills
+    # TSLA's early years); bare 'Depreciation' is deliberately excluded — it is a
+    # semantically narrower fact and fill-gap would silently mix it into the series.
+    # All 5 current issuers file the primary tag (probed 2026-07-05).
+    Concept(
+        "depreciation_amortization",
+        ("DepreciationDepletionAndAmortization", "DepreciationAndAmortization"),
+        "us-gaap",
+        "USD",
+        DURATION,
+        False,
+    ),
     # Share counts: split-adjustable, unit 'shares'.
     Concept(
         "shares_diluted",
