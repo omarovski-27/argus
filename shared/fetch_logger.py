@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
+import time
+
 from shared.db import get_client
+
+
+def elapsed_ms(start: float) -> int:
+    """Whole milliseconds since a ``time.monotonic()`` reading (for latency_ms)."""
+    return int((time.monotonic() - start) * 1000)
 
 # Allowed status values — these MUST match the fetch_log CHECK constraint in the
 # applied migration (supabase/migrations/20260612175007_init_spine.sql, table 15)
