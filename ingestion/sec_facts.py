@@ -68,10 +68,14 @@ from shared.db import get_client
 from shared.exceptions import FetchError
 from shared.fetcher_base import fetch_with_retry
 
-# TSLA only for this cut (one issuer — prove the pipeline before fanning out).
+# Default issuer (the original single-issuer cut). Every function below now takes
+# symbol/cik parameters so the analyst module can ingest peer issuers through the
+# SAME proven pipeline (analyst-module §1 Stage 3); these defaults keep the original
+# TSLA probe (`python -m ingestion.sec_facts`) and all existing callers unchanged.
 SYMBOL = "TSLA"
 CIK = "0001318605"  # Tesla, Inc. — SEC company-facts is keyed on the 10-digit CIK.
-COMPANY_FACTS_URL = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{CIK}.json"
+COMPANY_FACTS_URL_TEMPLATE = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
+COMPANY_FACTS_URL = COMPANY_FACTS_URL_TEMPLATE.format(cik=CIK)
 
 # SEC's fair-access policy asks for a descriptive UA with a contact address; this
 # is a courtesy header, not a credential (so it is fine in code / fetch_log).
@@ -107,14 +111,37 @@ class Concept:
 
 # The 11-concept registry. Order is purely cosmetic (report order).
 CONCEPTS: tuple[Concept, ...] = (
-    Concept("revenue", ("Revenues",), "us-gaap", "USD", DURATION, False),
+    # revenue: 'Revenues' first (TSLA/GM/F consolidated line), then the ASC 606 tag
+    # (RIVN files ONLY that one; probed 2026-07-05), then the pre-606 legacy tag for
+    # deep history. Fill-gap: issuers already covered by 'Revenues' take nothing new.
+    Concept(
+        "revenue",
+        (
+            "Revenues",
+            "RevenueFromContractWithCustomerExcludingAssessedTax",
+            "SalesRevenueNet",
+        ),
+        "us-gaap",
+        "USD",
+        DURATION,
+        False,
+    ),
     # net_income: NetIncomeLoss only — never ProfitLoss (a different, broader tag).
     Concept("net_income", ("NetIncomeLoss",), "us-gaap", "USD", DURATION, False),
     Concept("operating_income", ("OperatingIncomeLoss",), "us-gaap", "USD", DURATION, False),
     # Balance-sheet snapshots: instant facts (no start), period_start stays NULL.
     Concept("total_assets", ("Assets",), "us-gaap", "USD", INSTANT, False),
     Concept("total_liabilities", ("Liabilities",), "us-gaap", "USD", INSTANT, False),
-    Concept("cost_of_revenue", ("CostOfRevenue",), "us-gaap", "USD", DURATION, False),
+    # cost_of_revenue: GM/F/RIVN file CostOfGoodsAndServicesSold, not CostOfRevenue
+    # (probed 2026-07-05) — the 2nd tag fills those issuers entirely.
+    Concept(
+        "cost_of_revenue",
+        ("CostOfRevenue", "CostOfGoodsAndServicesSold"),
+        "us-gaap",
+        "USD",
+        DURATION,
+        False,
+    ),
     Concept("gross_profit", ("GrossProfit",), "us-gaap", "USD", DURATION, False),
     # operating_cash_flow: the 2nd tag fills only the years the 1st never filed
     # (TSLA's 2014-2015 gap) — fill-gap, never summed.
@@ -202,13 +229,13 @@ def _period_key(data_point: dict, kind: str) -> tuple[str | None, str]:
     return (None, data_point["end"])
 
 
-def _fetch_company_facts(run_id: str) -> dict:
+def _fetch_company_facts(run_id: str, symbol: str = SYMBOL, cik: str = CIK) -> dict:
     """Fetch the full company-facts document once (every concept slices from it)."""
     return fetch_with_retry(
-        COMPANY_FACTS_URL,
+        COMPANY_FACTS_URL_TEMPLATE.format(cik=cik),
         {"User-Agent": USER_AGENT},
         {},
-        f"sec_facts:{SYMBOL}",
+        f"sec_facts:{symbol}",
         run_id,
     )
 
@@ -249,11 +276,11 @@ def _select(facts: dict, concept: Concept) -> list[tuple[str, dict]]:
     return selected
 
 
-def _to_row(concept: Concept, tag: str, data_point: dict) -> dict:
+def _to_row(concept: Concept, tag: str, data_point: dict, symbol: str = SYMBOL) -> dict:
     """Map one SEC data point to a ``fundamentals`` row (1:1, no derived numbers)."""
     is_duration = concept.period_kind == DURATION
     return {
-        "symbol": SYMBOL,
+        "symbol": symbol,
         "concept": concept.name,
         "tag": tag,  # the tag that actually supplied this period (priority list).
         "unit": concept.unit,
@@ -269,19 +296,19 @@ def _to_row(concept: Concept, tag: str, data_point: dict) -> dict:
     }
 
 
-def _row_count(client, concept: Concept) -> int:
+def _row_count(client, concept: Concept, symbol: str = SYMBOL) -> int:
     """Current count of this concept's rows in ``fundamentals`` (for the delta)."""
     resp = (
         client.table("fundamentals")
         .select("id", count="exact")
-        .eq("symbol", SYMBOL)
+        .eq("symbol", symbol)
         .eq("concept", concept.name)
         .execute()
     )
     return resp.count or 0
 
 
-def ingest_concept(client, facts: dict, concept: Concept) -> dict:
+def ingest_concept(client, facts: dict, concept: Concept, symbol: str = SYMBOL) -> dict:
     """Filter -> map -> idempotent-upsert one concept; return its counts.
 
     ``mapped`` is rows offered to the upsert (after filter + fill-gap), ``inserted``
@@ -289,46 +316,86 @@ def ingest_concept(client, facts: dict, concept: Concept) -> dict:
     now in the table for this concept.
     """
     selected = _select(facts, concept)
-    rows = [_to_row(concept, tag, dp) for tag, dp in selected]
+    rows = [_to_row(concept, tag, dp, symbol) for tag, dp in selected]
     by_tag = {tag: sum(1 for t, _ in selected if t == tag) for tag in concept.tags}
 
-    before = _row_count(client, concept)
+    before = _row_count(client, concept, symbol)
     if rows:
         client.table("fundamentals").upsert(
             rows,
             on_conflict=UPSERT_CONFLICT,
             ignore_duplicates=True,  # insert-once; NULLS NOT DISTINCT dedupes instants.
         ).execute()
-    after = _row_count(client, concept)
+    after = _row_count(client, concept, symbol)
     return {"mapped": len(rows), "inserted": after - before, "total": after, "by_tag": by_tag}
 
 
-def ingest_all(run_id: str | None = None) -> dict[str, dict]:
-    """Fetch once -> ingest every concept; return per-concept counts.
+def _verify_pairing(symbol: str, cik: str, run_id: str) -> None:
+    """Raise unless the SEC ticker map agrees ``symbol`` -> ``cik`` (Law 2 gate).
+
+    A mispaired call would write another issuer's numbers under this symbol — the
+    silent-corruption class Law 2 exists to kill — so the pairing is checked against
+    the independent company_tickers.json map BEFORE any write. Imported lazily:
+    ``analyst.cik`` imports this module for USER_AGENT, so a top-level import would
+    be a cycle. A symbol the map lacks also raises — callers with a genuinely
+    unmapped issuer pass ``verify_pairing=False`` explicitly, on their own head.
+    """
+    from analyst.cik import resolve_cik
+
+    resolved = resolve_cik(symbol, run_id)
+    if resolved is None:
+        raise ValueError(
+            f"sec_facts: {symbol!r} is not in the SEC ticker map; refusing to ingest "
+            f"under an unverifiable CIK (pass verify_pairing=False to override)."
+        )
+    if resolved != cik:
+        raise ValueError(
+            f"sec_facts: symbol/CIK mispairing — {symbol!r} resolves to CIK {resolved}, "
+            f"not {cik}. Refusing to write another issuer's numbers (Law 2)."
+        )
+
+
+def ingest_all(
+    run_id: str | None = None,
+    symbol: str = SYMBOL,
+    cik: str = CIK,
+    *,
+    verify_pairing: bool = True,
+) -> dict[str, dict]:
+    """Fetch once -> ingest every concept for one issuer; return per-concept counts.
 
     The company-facts document is fetched a single time and every concept is sliced
     from it. A fetch outage is already in fetch_log (Law 7); it is surfaced and
     re-raised. Per-concept DB errors are NOT swallowed — they propagate.
+
+    Args:
+        run_id: fetch_log grouping id; a timestamped manual id is generated if omitted.
+        symbol: issuer ticker written to ``fundamentals.symbol`` (default TSLA).
+        cik: the issuer's 10-digit zero-padded CIK.
+        verify_pairing: check symbol->cik against the SEC ticker map and REFUSE on
+            mismatch before any write (default True; see :func:`_verify_pairing`).
     """
     run_id = run_id or _new_run_id("manual-sec_facts")
+    if verify_pairing:
+        _verify_pairing(symbol, cik, run_id)
     client = get_client()
 
     try:
-        facts = _fetch_company_facts(run_id)
+        facts = _fetch_company_facts(run_id, symbol, cik)
     except FetchError as exc:
         # Already in fetch_log via the shared fetcher (Law 7); surface and re-raise.
-        print(f"[sec_facts] {SYMBOL}: company-facts unavailable — {exc}")
+        print(f"[sec_facts] {symbol}: company-facts unavailable — {exc}")
         raise
 
     results: dict[str, dict] = {}
     for concept in CONCEPTS:
-        counts = ingest_concept(client, facts, concept)
+        counts = ingest_concept(client, facts, concept, symbol)
         results[concept.name] = counts
         tag_note = ""
         if len(concept.tags) > 1:
             tag_note = "  [" + ", ".join(f"{t}={n}" for t, n in counts["by_tag"].items()) + "]"
         print(
-            f"[sec_facts] {SYMBOL} {concept.name:<20} "
+            f"[sec_facts] {symbol} {concept.name:<20} "
             f"{counts['mapped']:>3} mapped, "
             f"{counts['inserted']:>3} inserted, "
             f"{counts['total']:>3} in table{tag_note}"
@@ -336,7 +403,7 @@ def ingest_all(run_id: str | None = None) -> dict[str, dict]:
 
     total_inserted = sum(c["inserted"] for c in results.values())
     print(
-        f"[sec_facts] {SYMBOL}: {total_inserted} row(s) inserted this run "
+        f"[sec_facts] {symbol}: {total_inserted} row(s) inserted this run "
         f"across {len(CONCEPTS)} concepts."
     )
     return results
