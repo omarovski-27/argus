@@ -37,10 +37,19 @@ def test_is_non_data_source_matches_by_prefix():
     assert is_non_data_source("pipeline:av_news")
     assert is_non_data_source("pipeline:telegram")
     assert is_non_data_source("config_read:sleeve_shares")
+    # The dossier pipeline: analyst:draft logs only on failure BY DESIGN (a repaired
+    # draft is a normal outcome) — included, it would redden /health forever, the
+    # exact telegram_webhook bug. Dossier failures surface via the red analyze.yml
+    # run + Telegram alert, not §5.
+    assert is_non_data_source("analyst:draft")
+    assert is_non_data_source("analyst:law1")
+    assert is_non_data_source("sec_facts:PLTR")
     assert not is_non_data_source("tiingo:TSLA")
     assert not is_non_data_source("ibkr_flex:positions")
     assert not is_non_data_source("journal:checkpoint_push")  # a real job, not excluded
-    assert NON_DATA_SOURCES == {"pipeline", "telegram_webhook", "config_read"}
+    assert NON_DATA_SOURCES == {
+        "pipeline", "telegram_webhook", "config_read", "analyst", "sec_facts"
+    }
 
 
 # --------------------------------------------------------------------------- #

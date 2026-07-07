@@ -763,7 +763,13 @@ def handle_analyze(message: dict) -> str:
         return "Usage: /analyze TICKER (e.g. /analyze TSLA)"
     ticker = parts[1].split("@")[0].upper()
     if not _TICKER_RE.match(ticker):
-        return f"⚠️ {parts[1]!r} doesn't look like a ticker (e.g. TSLA, GM, BRK.B)."
+        # Deliberately does NOT echo the input: the reply goes through a
+        # Markdown-parsed send, and a stray '_'/'*' in user text would 400 the
+        # send and turn a friendly refusal into "Internal error".
+        return "⚠️ That doesn't look like a ticker — 1-5 letters/digits, e.g. TSLA, GM, BRK.B."
+    # Class shares: SEC's ticker map and yfinance both use the dash form (BRK-B),
+    # so the dot form users naturally type is normalized before dispatch.
+    ticker = ticker.replace(".", "-")
 
     load_dotenv(override=True)
     repo = os.environ.get("GH_REPO")

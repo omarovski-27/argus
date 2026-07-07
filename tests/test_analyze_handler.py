@@ -44,10 +44,12 @@ def test_dispatches_analyze_workflow_with_ticker_and_acks(dispatch_env):
     assert call["headers"]["Authorization"] == "Bearer test-pat"
 
 
-def test_class_share_tickers_pass_the_shape_gate(dispatch_env):
+def test_class_share_tickers_normalize_to_the_sec_dash_form(dispatch_env):
+    # SEC's ticker map and yfinance use BRK-B; the dot form users type is normalized
+    # so a class-share /analyze doesn't produce a near-empty reduced-depth dossier.
     reply = handlers.handle_analyze({"text": "/analyze brk.b"})
-    assert reply == "Building dossier for BRK.B, ~5 min ⏳"
-    assert dispatch_env[0]["json"]["inputs"]["ticker"] == "BRK.B"
+    assert reply == "Building dossier for BRK-B, ~5 min ⏳"
+    assert dispatch_env[0]["json"]["inputs"]["ticker"] == "BRK-B"
 
 
 def test_missing_argument_returns_usage_without_dispatch(dispatch_env):
@@ -56,10 +58,13 @@ def test_missing_argument_returns_usage_without_dispatch(dispatch_env):
     assert dispatch_env == []
 
 
-@pytest.mark.parametrize("bad", ["7up!", "TOOLONGG", "TS;LA", "$(rm)", "..", "1TSLA"])
-def test_malformed_ticker_is_rejected_without_dispatch(dispatch_env, bad):
+@pytest.mark.parametrize("bad", ["7up!", "TOOLONGG", "TS;LA", "$(rm)", "..", "1TSLA", "x__y*"])
+def test_malformed_ticker_is_rejected_without_dispatch_or_echo(dispatch_env, bad):
     reply = handlers.handle_analyze({"text": f"/analyze {bad}"})
     assert "doesn't look like a ticker" in reply
+    # The refusal must not echo user text: it rides a Markdown-parsed send, where a
+    # stray '_'/'*' 400s and turns the refusal into "Internal error".
+    assert bad not in reply
     assert dispatch_env == [], f"shape gate let {bad!r} through to the dispatch"
 
 

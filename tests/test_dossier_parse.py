@@ -94,3 +94,56 @@ def test_off_vocabulary_raises_naming_the_field(mutate, fragment):
     with pytest.raises(VerdictParseError, match="off-vocabulary") as err:
         parse_verdicts(_dossier(bad))
     assert fragment in str(err.value)
+
+
+def test_stage_references_are_masked_before_grounding():
+    """Stage headers/cross-refs are contract STRUCTURE, not data claims: on a sparse
+    pack their digits ground to nothing and deadlock the repair pass against the
+    fixed-structure clause (NTDOY probe). Only 'stage [1-8]' is masked — real
+    figures still flag."""
+    from analyst.dossier import _mask_structural
+    from digest.grounding import validate_text
+
+    sparse_block = "TARGET\nsymbol ZZZ; SEC CIK unresolved"
+    text = "STAGE 8 — MR. MARKET\nNothing here (see Stage 3). Not available."
+    assert validate_text(_mask_structural(text), sparse_block) == []
+    # A genuine ungrounded figure survives the mask.
+    dirty = _mask_structural("STAGE 2 — FINANCIALS\nRevenue was 137.")
+    assert [v["token"] for v in validate_text(dirty, sparse_block)] == ["137"]
+
+
+def test_verdict_problems_cross_check_the_valuation():
+    from analyst.dossier import _verdict_problems
+
+    ok = {"graham": {"verdict": "CHEAP", "margin_of_safety_pct": 69.4},
+          "taleb": {"verdict": "FRAGILE", "ruin_list": ["recession demand collapse"]}}
+    val = {"renderable": True, "margin_of_safety_pct": 0.6944}
+    assert _verdict_problems(ok, val) == []
+
+    # n/m valuation (deep-negative MoS) demands null.
+    nm_val = {"renderable": True, "margin_of_safety_pct": -10.2}
+    bad = {"graham": {"verdict": "EXPENSIVE", "margin_of_safety_pct": -1020.0},
+           "taleb": {"verdict": "FRAGILE", "ruin_list": ["x"]}}
+    assert any("must be null" in p for p in _verdict_problems(bad, nm_val))
+
+    # A meaningful MoS must be echoed, and echoed correctly.
+    missing = {"graham": {"verdict": "CHEAP", "margin_of_safety_pct": None},
+               "taleb": {"verdict": "FRAGILE", "ruin_list": ["x"]}}
+    assert any("is null but the DATA renders" in p for p in _verdict_problems(missing, val))
+    wrong = {"graham": {"verdict": "CHEAP", "margin_of_safety_pct": 42.0},
+             "taleb": {"verdict": "FRAGILE", "ruin_list": ["x"]}}
+    assert any("not the DATA's margin of safety" in p for p in _verdict_problems(wrong, val))
+
+    # Instruction-shaped ruin-list items are flagged (they bypass the prose lint).
+    nudge = {"graham": {"verdict": "CHEAP", "margin_of_safety_pct": 69.4},
+             "taleb": {"verdict": "FRAGILE", "ruin_list": ["you should sell before covenant breach"]}}
+    assert any("instruction-shaped" in p for p in _verdict_problems(nudge, val))
+
+
+def test_form_names_are_masked_as_nomenclature():
+    from analyst.dossier import _mask_structural
+    from digest.grounding import validate_text
+
+    sparse_block = "TARGET\nsymbol ZZZ; SEC CIK unresolved"
+    text = "No Form 20-F on record; no 10-K, no DEF 14A. Not available."
+    assert validate_text(_mask_structural(text), sparse_block) == []

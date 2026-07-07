@@ -227,6 +227,27 @@ def _news(symbol: str, client) -> dict:
         }
 
 
+def _filings_health(filings: dict) -> str:
+    """The pack's health verdict for the filings block. Pure.
+
+    ``filings_block`` returns one of three shapes: per-form dicts with
+    ``sections`` (success), per-form dicts with only a ``note`` (per-form
+    failure), or — for an unresolved CIK — a single top-level ``{"note": str}``
+    whose values() are STRINGS. The old inline expression called ``.get`` on
+    that string and crashed the whole reduced-depth pack build for every
+    non-SEC ticker (caught by the NTDOY hallucination probe).
+    """
+    if not isinstance(filings, dict) or not filings:
+        return "unavailable"
+    form_entries = [v for v in filings.values() if isinstance(v, dict)]
+    if any("sections" in v for v in form_entries):
+        return "success"
+    note = filings.get("note")
+    if isinstance(note, str) and note:
+        return note
+    return next((v["note"] for v in form_entries if v.get("note")), "unavailable")
+
+
 def build_data_pack(symbol: str, run_id: str | None = None, client=None) -> dict:
     """Assemble the frozen data pack for ``symbol`` (see module docstring).
 
@@ -272,13 +293,7 @@ def build_data_pack(symbol: str, run_id: str | None = None, client=None) -> dict
         peer_rows.append(row)
 
     filings = filings_block(sym, cik, run_id)
-    health["filings"] = (
-        "success"
-        if any("sections" in (v or {}) for v in filings.values())
-        else next(iter(filings.values()), {}).get("note", "unavailable")
-        if isinstance(filings, dict) and filings
-        else "unavailable"
-    )
+    health["filings"] = _filings_health(filings)
 
     estimates = estimates_block(sym, run_id)
     health["estimates"] = (

@@ -41,7 +41,7 @@ from anthropic import Anthropic
 from dotenv import load_dotenv
 
 from analyst.data_pack import build_data_pack
-from analyst.law1 import CLOSING_LINE, enforce_law1, validate_law1
+from analyst.law1 import BANNED_PATTERNS, CLOSING_LINE, enforce_law1, validate_law1
 from analyst.serialize import serialize_analysis
 from digest.grounding import validate_text
 from quant.valuation import run_valuation
@@ -69,7 +69,7 @@ _SYSTEM = f"""You are writing an Argus analyst dossier — a fundamental-analysi
 You know these companies from training. Those priors are INADMISSIBLE here: if a specific figure is not printed in the DATA block, it does not exist for this dossier. That includes segment revenue splits, expense line items (R&D, SG&A, restructuring and the like), award and option counts, and any year-over-year change you would have to compute — even when you are confident you remember the true number, citing it is a violation.
 
 Hard rules (all five bind on every dossier):
-1. Grounding. Every number, date, and factual claim comes from the DATA block — filed figures, the derived metrics, the valuation-engine outputs, the filings excerpts, the consensus block, the news lines. Never supply a figure from memory, never estimate, and never compute a new number yourself (no sums, ratios, spreads, differences, growth rates, or percentages of your own — the block pre-computes what you may cite). The FILINGS TEXT excerpts are the ONLY filing content that exists for you: you know these companies from elsewhere, but a figure, date, or breakdown you remember from a filing and cannot point to in the excerpt is a fabrication here — segment revenue splits, option counts, award terms, vesting years and similar fine detail may be cited only if the excerpt itself states them. When you shorten a DATA figure, ROUND it at the last digit you display — never truncate (a cut-off digit makes it a different, wrong number); when unsure, quote the figure as the DATA prints it. When you want to combine two DATA numbers, cite each separately instead of the sum. When the structure calls for a comparison or trend the DATA does not pre-compute, describe its direction in words (higher/lower, widened/narrowed) with the underlying DATA figures — never a delta you derived. If something the structure calls for is not in the DATA, write "not available" and move on; a named gap is content, a filled gap is a violation.
+1. Grounding. Every number, date, and factual claim comes from the DATA block — filed figures, the derived metrics, the valuation-engine outputs, the filings excerpts, the consensus block, the news lines. Never supply a figure from memory, never estimate, and never compute a new number yourself (no sums, ratios, spreads, differences, growth rates, or percentages of your own — the block pre-computes what you may cite). The FILINGS TEXT excerpts are the ONLY filing content that exists for you: you know these companies from elsewhere, but a figure, date, or breakdown you remember from a filing and cannot point to in the excerpt is a fabrication here — segment revenue splits, option counts, award terms, vesting years and similar fine detail may be cited only if the excerpt itself states them. When you shorten a DATA figure, ROUND it at the last digit you display — never truncate (a cut-off digit makes it a different, wrong number); when unsure, quote the figure as the DATA prints it. Filing tables print figures in the table's stated units (often "in thousands" or "in millions"): cite such figures EXACTLY as the excerpt prints them, with the table's own unit spelled out in words right after the number — NEVER expand them to full-dollar form and never convert between units (thousands to dollars, millions to billions); a figure written with more digits than the excerpt prints is a converted, computed number and a violation. When you want to combine two DATA numbers, cite each separately instead of the sum. When the structure calls for a comparison or trend the DATA does not pre-compute, describe its direction in words (higher/lower, widened/narrowed) with the underlying DATA figures — never a delta you derived. If something the structure calls for is not in the DATA, write "not available" and move on; a named gap is content, a filled gap is a violation.
 2. No instructions. You never tell the reader to buy, sell, enter, exit, add, trim, accumulate, hold, or wait; no entry/exit points, no position sizes, no "attractive here", no timing language. Framework verdicts (cheap/expensive, wonderful/mediocre, fragile/antifragile) are analysis and required; anything that directs an action is forbidden. When the valuation block and the market price disagree, state the disagreement and what each side assumes — the reader owns the conclusion.
 3. Fixed structure. Exactly the stages and sections listed below, in order, every dossier. Keep a stage's header even when its data is thin — say what is missing instead.
 4. Interpretation beside every number. No bare figures: each number you cite gets its plain meaning in the same sentence, on its own scale, from the DATA's own anchors (a peer column, a prior year, a stated range). Do not grade magnitudes the DATA gives no anchor for. Scenario outputs are consequences of their stated assumptions — always present them WITH those assumptions, never as forecasts.
@@ -102,6 +102,26 @@ VERDICTS_JSON: {{"graham": {{"verdict": "...", "margin_of_safety_pct": <number o
 The verdict tokens must be exactly from the sets above; margin_of_safety_pct is the DATA's percentage as a number, or null when the DATA renders it as not meaningful.
 
 Length/tone: 1,200-1,800 words before the verdict block. Plain analyst prose — no hype, no hedging filler, no preamble, no meta-narration of your method. Confident about what the DATA shows, explicit about what it does not. Plain text only: no Markdown symbols (#, *, _, backticks, tables); stage headers as CAPITALS lines; blank lines between paragraphs."""
+
+
+# The contract's own stage references — "STAGE 6 — FRAGILITY AUDIT" headers and
+# "see Stage 7" cross-refs. Their digits are mandated STRUCTURE (clause 3), not data
+# claims: on a sparse pack they ground to nothing, and the repair pass then deadlocks
+# against the fixed-structure clause (the model may not delete headers — NTDOY probe).
+# Masked before grounding; nothing else is. A rich block grounds them anyway.
+_STAGE_REF_RE = re.compile(r"\bstage\s+[1-8]\b", re.IGNORECASE)
+# SEC form NAMES are nomenclature, not figures — "a Form 20-F if filed" on a sparse
+# pack flagged its '20' (NTDOY probe, round 3). Only the form-name token is blanked;
+# figures beside it still validate.
+_FORM_NAME_RE = re.compile(
+    r"\b(?:form\s+)?(?:10-K|10-Q|20-F|8-K|6-K|DEF\s?14A|13[DFG])\b", re.IGNORECASE
+)
+
+
+def _mask_structural(text: str) -> str:
+    """Blank the contract's stage references and SEC form names (same-length mask)."""
+    masked = _STAGE_REF_RE.sub(lambda m: " " * len(m.group(0)), text)
+    return _FORM_NAME_RE.sub(lambda m: " " * len(m.group(0)), masked)
 
 
 class VerdictParseError(RuntimeError):
@@ -201,6 +221,41 @@ def parse_verdicts(raw_text: str) -> tuple[str, dict]:
     return dossier_text, verdicts
 
 
+def _verdict_problems(verdicts: dict, valuation: dict) -> list[str]:
+    """Cross-check the machine verdicts against the valuation output (Law 2). Pure.
+
+    The verdicts JSON is stored and re-rendered downstream, but the two text gates
+    only see the PROSE — parse_verdicts strips the machine line first. So the two
+    numbers-and-strings that ride in it are checked here: the Graham
+    margin-of-safety percentage must be the valuation engine's own figure (null
+    when the engine renders it not-meaningful — the serializer's n/m cap), and the
+    ruin-list strings must pass the Law-1 instruction-shape patterns.
+    """
+    problems: list[str] = []
+    mos = (verdicts.get("graham") or {}).get("margin_of_safety_pct")
+    val_mos = valuation.get("margin_of_safety_pct") if valuation.get("renderable") else None
+    if val_mos is None or val_mos < -1.0:
+        if mos is not None:
+            problems.append(
+                f"graham.margin_of_safety_pct must be null — the valuation renders no "
+                f"meaningful percentage — but got {mos}"
+            )
+    elif mos is None:
+        problems.append(
+            "graham.margin_of_safety_pct is null but the DATA renders a margin of safety"
+        )
+    elif abs(float(mos) - val_mos * 100.0) > 0.06:  # the block renders 1 decimal
+        problems.append(
+            f"graham.margin_of_safety_pct {mos} is not the DATA's margin of safety "
+            f"({val_mos * 100.0:.1f})"
+        )
+    for item in (verdicts.get("taleb") or {}).get("ruin_list") or []:
+        for rule, pattern in BANNED_PATTERNS:
+            if pattern.search(str(item)):
+                problems.append(f"ruin_list item is instruction-shaped [{rule}]: {item!r}")
+    return problems
+
+
 def _draft_problems(dossier_text: str, block: str) -> list[str]:
     """Both gates' violations for a DRAFT, as repair-note lines (empty = clean draft).
 
@@ -209,7 +264,7 @@ def _draft_problems(dossier_text: str, block: str) -> list[str]:
     """
     problems = [
         f"ungrounded figure {v['token']!r} in: ...{v['context']}..."
-        for v in validate_text(dossier_text, block)
+        for v in validate_text(_mask_structural(dossier_text), block)
     ]
     problems += [
         f"instruction-shaped language [{v['rule']}]: ...{v['excerpt']}..."
@@ -275,17 +330,24 @@ def run_dossier(
     # reach store/send.
     try:
         dossier_text, verdicts = parse_verdicts(raw)
-        problems = _draft_problems(dossier_text, block)
+        problems = _draft_problems(dossier_text, block) + _verdict_problems(verdicts, valuation)
     except VerdictParseError as exc:
         problems = [f"the VERDICTS_JSON machine line is invalid: {exc}"]
     if problems:
         write_fetch_log("analyst:draft", run_id, "failure", elapsed_ms(start), "; ".join(problems)[:500])
         print(f"[dossier] draft failed pre-gate ({len(problems)} problem(s)); one repair pass.")
+        # The draft RIDES ALONG and the edit is minimal-diff by instruction: an early
+        # repair variant that only named the problems made the model regenerate from
+        # scratch, which INTRODUCED new violations (GM run: 1 draft problem -> 8).
         repair_note = (
-            "REPAIR: your previous draft violated the hard rules in these places — fix "
-            "every one. Remove or replace each offending figure/passage using ONLY the "
-            "DATA block (cite the DATA's figure, or state the gap as 'not available'). "
-            "Reproduce the full dossier, same structure:\n- " + "\n- ".join(problems)
+            "REPAIR: your previous draft (below) violated the hard rules in the listed "
+            "places. Reproduce the dossier with the SMALLEST edits that fix every "
+            "listed problem: replace each offending figure/passage with the DATA "
+            "block's own form (exactly as the DATA prints it) or with 'not available'. "
+            "Keep every other sentence unchanged, keep the full structure, and end "
+            "with the VERDICTS_JSON line.\nProblems:\n- "
+            + "\n- ".join(problems)
+            + "\n\nPREVIOUS DRAFT:\n" + raw
         )
         start = time.monotonic()
         try:
@@ -294,11 +356,17 @@ def run_dossier(
             write_fetch_log("analyst:repair", run_id, "failure", elapsed_ms(start), str(exc)[:500])
             raise
         write_fetch_log("analyst:repair", run_id, "success", elapsed_ms(start))
-        dossier_text, verdicts = parse_verdicts(raw)
+        try:
+            dossier_text, verdicts = parse_verdicts(raw)
+        except VerdictParseError as exc:
+            # The run's TERMINAL failure must land in fetch_log (Law 7) — the job
+            # alert points Omar there; an unlogged raise would leave only greens.
+            write_fetch_log("analyst:verdicts", run_id, "failure", 0, str(exc)[:500])
+            raise
     _gate(run_id, "law1", lambda: enforce_law1(dossier_text))
 
     def _grounding() -> None:
-        violations = validate_text(dossier_text, block)
+        violations = validate_text(_mask_structural(dossier_text), block)
         if violations:
             listed = "; ".join(f"{v['token']!r} ({v['context']!r})" for v in violations[:6])
             raise RuntimeError(
@@ -306,6 +374,13 @@ def run_dossier(
             )
 
     _gate(run_id, "grounding", _grounding)
+
+    def _verdicts_gate() -> None:
+        problems = _verdict_problems(verdicts, valuation)
+        if problems:
+            raise RuntimeError("; ".join(problems))
+
+    _gate(run_id, "verdicts", _verdicts_gate)
 
     result = {
         "run_id": run_id,

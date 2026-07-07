@@ -28,8 +28,23 @@ CONFIG_KEY = "synthesis_model"
 
 
 def seed_synthesis_model() -> None:
-    """Upsert the single config row, then read it back (verify)."""
+    """Insert the single config row when absent; REFUSE to overwrite a changed one.
+
+    A deliberately upgraded ``synthesis_model`` (the documented upgrade path is a
+    config edit) must never be silently reverted by a re-run — the same
+    drift-revert shape the ``seed_config`` live-DB guard exists to prevent (L6).
+    """
     client = get_client()
+    stored = (
+        client.table("config").select("value").eq("key", CONFIG_KEY).limit(1).execute().data
+    )
+    if stored and stored[0]["value"] != DEFAULT_MODEL:
+        print(
+            f"[seed_synthesis_model] REFUSED: config.{CONFIG_KEY} is already "
+            f"{stored[0]['value']!r} — a deliberate setting. Change it with a manual "
+            f"single-key upsert, never a re-seed (L6)."
+        )
+        return
     client.table("config").upsert(
         [{"key": CONFIG_KEY, "value": DEFAULT_MODEL}], on_conflict="key"
     ).execute()

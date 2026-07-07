@@ -328,3 +328,36 @@ def test_jsonable_freezes_hostile_values():
     assert frozen["np"] == 42
     assert frozen["tup"] == [1, 2]
     assert frozen["nested"] == {"ok": [1.5, None]}
+
+
+# --------------------------------------------------------------------------- #
+# _filings_health — the reduced-depth crash fix (NTDOY probe, completion run)
+# --------------------------------------------------------------------------- #
+def test_filings_health_success_shape():
+    from analyst.data_pack import _filings_health
+
+    filings = {"10k": {"accn": "a", "sections": {"mdna": {"text": "x"}}},
+               "def14a": {"note": "no DEF 14A on record at EDGAR"}}
+    assert _filings_health(filings) == "success"
+
+
+def test_filings_health_cik_unresolved_note_is_a_string_not_a_crash():
+    from analyst.data_pack import _filings_health
+
+    # The reduced-depth shape whose values() are STRINGS — the old inline
+    # expression called .get on one and crashed every non-SEC-ticker pack.
+    filings = {"note": "CIK unresolved: no EDGAR filings (reduced-depth dossier)"}
+    assert _filings_health(filings) == "CIK unresolved: no EDGAR filings (reduced-depth dossier)"
+
+
+def test_filings_health_per_form_failure_surfaces_first_note():
+    from analyst.data_pack import _filings_health
+
+    filings = {"10k": {"note": "unavailable: EDGAR 503"}, "def14a": {"note": "no DEF 14A on record at EDGAR"}}
+    assert _filings_health(filings) == "unavailable: EDGAR 503"
+
+
+def test_filings_health_empty_is_unavailable():
+    from analyst.data_pack import _filings_health
+
+    assert _filings_health({}) == "unavailable"

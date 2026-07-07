@@ -24,7 +24,16 @@ from __future__ import annotations
 #                        stores' later successes MASKED it most-recent-wins (PHASE0-TODO #4).
 #                        A config read is infra, not a §5 data feed: excluded here on both
 #                        surfaces, while the fetch_log row keeps the forensic trail.
-NON_DATA_SOURCES: frozenset[str] = frozenset({"pipeline", "telegram_webhook", "config_read"})
+#   • analyst, sec_facts — the Phase-5 dossier pipeline's step outcomes and its per-issuer
+#                        SEC pulls. They feed the ANALYST module, not the digest — §5's verdict
+#                        is about the digest's data feeds — and several labels (analyst:draft)
+#                        log only on failure by design (a repaired draft is a normal outcome),
+#                        which would otherwise redden /health forever, the exact
+#                        telegram_webhook categorization bug. A dossier-run failure surfaces
+#                        loud on its own channel: the red analyze.yml run + its Telegram alert.
+NON_DATA_SOURCES: frozenset[str] = frozenset(
+    {"pipeline", "telegram_webhook", "config_read", "analyst", "sec_facts"}
+)
 
 
 def logical_source(label: str) -> str:
