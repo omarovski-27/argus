@@ -1,10 +1,11 @@
 """Argus bot — instant command handlers (blueprint §2 item 10 / §3 / §7 / §9).
 
-Six handlers behind the Telegram commands ``/book /journal /skip /health /override
-/pulse``. Each is a pure function ``(message: dict) -> str``: it reads (or writes) the
-Supabase spine directly and returns a reply string. ``api.webhook`` owns the actual
-``send_message`` call, so handlers never touch the network except ``/pulse``, whose
-job IS an outbound trigger (it fires a GitHub Actions ``workflow_dispatch``).
+The handlers behind the Telegram commands ``/book /journal /skip /health /override
+/pulse /analyze``. Each is a pure function ``(message: dict) -> str``: it reads (or
+writes) the Supabase spine directly and returns a reply string. ``api.webhook`` owns
+the actual ``send_message`` call, so handlers never touch the network except ``/pulse``
+and ``/analyze``, whose job IS an outbound trigger (a GitHub Actions
+``workflow_dispatch``).
 
 Design notes tied to the live schema (schema is truth — the §4 migration):
   • Facts are retrieved, never generated (Law 2): every number rendered here comes
@@ -21,6 +22,7 @@ Design notes tied to the live schema (schema is truth — the §4 migration):
 from __future__ import annotations
 
 import os
+import re
 from datetime import date, datetime, timezone
 from typing import Any, NamedTuple
 
@@ -63,6 +65,15 @@ _OVERRIDE_TYPES: tuple[str, ...] = (
 _GITHUB_API_BASE = "https://api.github.com"
 _PULSE_WORKFLOW = "digest.yml"
 _HTTP_TIMEOUT_SECONDS = 30.0
+
+# /analyze → workflow_dispatch on the Phase-5 dossier workflow (module spec §4).
+_ANALYZE_WORKFLOW = "analyze.yml"
+# Ticker SHAPE check only (1-5 alphanumerics, optional .X/-X class suffix, must start
+# with a letter). Existence is deliberately NOT checked here — that is the pipeline's
+# job, where an unknown symbol degrades to a reduced-depth dossier that names its
+# gaps (Law 2) instead of a webhook-side guess. Shape-gating still keeps garbage
+# (and anything shell-hostile) out of the dispatch payload.
+_TICKER_RE = re.compile(r"^[A-Z][A-Z0-9]{0,4}(?:[.-][A-Z0-9]{1,2})?$")
 
 # /health scan window: fetch_log grows by ~15-30 rows/day, so the latest row for
 # every source comfortably falls inside the most recent 1000 rows (weeks of runs).
@@ -733,3 +744,43 @@ def handle_pulse(message: dict) -> str:
         # Surface, never swallow (Law 7); keep detail to the exception type (no PAT).
         return f"⚠️ Couldn't trigger pulse ({type(exc).__name__}). Check /health."
     return "Generating pulse digest ⏳ — arriving in ~1 min"
+
+
+# --------------------------------------------------------------------------- #
+# /analyze — fire a workflow_dispatch for a Phase-5 dossier run (module spec §4)
+# --------------------------------------------------------------------------- #
+def handle_analyze(message: dict) -> str:
+    """Trigger the analyze workflow's ``workflow_dispatch`` with the requested ticker.
+
+    Mirrors ``handle_pulse`` exactly: instant ack + dispatch, ZERO heavy work here
+    (§3 — the ~3-5 min pack/valuation/synthesis run lives in GitHub Actions). The
+    argument is shape-validated only (``_TICKER_RE``); a well-formed but unknown
+    symbol is the pipeline's case to handle (reduced-depth dossier, named gaps).
+    Failure surfaces to the user without leaking the PAT (Law 7 / §13).
+    """
+    parts = (message.get("text") or "").split()
+    if len(parts) < 2:
+        return "Usage: /analyze TICKER (e.g. /analyze TSLA)"
+    ticker = parts[1].split("@")[0].upper()
+    if not _TICKER_RE.match(ticker):
+        return f"⚠️ {parts[1]!r} doesn't look like a ticker (e.g. TSLA, GM, BRK.B)."
+
+    load_dotenv(override=True)
+    repo = os.environ.get("GH_REPO")
+    pat = os.environ.get("GH_DISPATCH_PAT")
+    if not repo or not pat:
+        return "⚠️ Analyze unavailable — GH_REPO / GH_DISPATCH_PAT not configured."
+
+    url = f"{_GITHUB_API_BASE}/repos/{repo}/actions/workflows/{_ANALYZE_WORKFLOW}/dispatches"
+    headers = {
+        "Authorization": f"Bearer {pat}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    body = {"ref": "main", "inputs": {"ticker": ticker}}
+    try:
+        response = httpx.post(url, headers=headers, json=body, timeout=_HTTP_TIMEOUT_SECONDS)
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        return f"⚠️ Couldn't trigger the dossier run ({type(exc).__name__}). Check /health."
+    return f"Building dossier for {ticker}, ~5 min ⏳"

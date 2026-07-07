@@ -38,6 +38,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from bot.handlers import (  # noqa: E402 — after the sys.path bootstrap above
     Reply,
+    handle_analyze,
     handle_book,
     handle_felt,
     handle_felt_callback,
@@ -55,11 +56,14 @@ from bot.telegram import (  # noqa: E402
 from bot.webhook_auth import chat_ok, secret_ok  # noqa: E402
 from shared.fetch_logger import write_fetch_log  # noqa: E402
 
-_UNKNOWN_REPLY = "Unknown command. Try /book /journal /felt /pulse /skip /health /override"
+_UNKNOWN_REPLY = (
+    "Unknown command. Try /book /journal /felt /pulse /analyze /skip /health /override"
+)
 
 # Command word → handler. Each handler is (message: dict) -> str.
 _COMMANDS = {
     "/pulse": handle_pulse,
+    "/analyze": handle_analyze,
     "/book": handle_book,
     "/journal": handle_journal,
     "/felt": handle_felt,
