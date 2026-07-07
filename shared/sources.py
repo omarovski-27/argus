@@ -18,7 +18,13 @@ from __future__ import annotations
 #                        otherwise redden the verdict forever. Including it is a categorization
 #                        bug, not a health signal. Webhook liveness is infra (an external prober),
 #                        a different question from §5 data health — never folded back in here.
-NON_DATA_SOURCES: frozenset[str] = frozenset({"pipeline", "telegram_webhook"})
+#   • config_read      — in-run reads of the config table (e.g. sleeve_shares inside the Flex
+#                        pull; log only on failure). Under the old 'ibkr_flex:config' label the
+#                        failure collapsed into the ibkr_flex verdict slot and the section
+#                        stores' later successes MASKED it most-recent-wins (PHASE0-TODO #4).
+#                        A config read is infra, not a §5 data feed: excluded here on both
+#                        surfaces, while the fetch_log row keeps the forensic trail.
+NON_DATA_SOURCES: frozenset[str] = frozenset({"pipeline", "telegram_webhook", "config_read"})
 
 
 def logical_source(label: str) -> str:

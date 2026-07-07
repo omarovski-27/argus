@@ -36,10 +36,11 @@ def test_is_non_data_source_matches_by_prefix():
     assert is_non_data_source("telegram_webhook")
     assert is_non_data_source("pipeline:av_news")
     assert is_non_data_source("pipeline:telegram")
+    assert is_non_data_source("config_read:sleeve_shares")
     assert not is_non_data_source("tiingo:TSLA")
     assert not is_non_data_source("ibkr_flex:positions")
     assert not is_non_data_source("journal:checkpoint_push")  # a real job, not excluded
-    assert NON_DATA_SOURCES == {"pipeline", "telegram_webhook"}
+    assert NON_DATA_SOURCES == {"pipeline", "telegram_webhook", "config_read"}
 
 
 # --------------------------------------------------------------------------- #
@@ -61,6 +62,51 @@ def test_digest_verdict_excludes_pipeline_and_keeps_real_feeds():
     ]
     out = {s["source"]: s["status"] for s in _aggregate_sources(rows)}
     assert out == {"fred": "success", "ibkr_flex": "failure"}  # no pipeline, no telegram_webhook
+
+
+# --------------------------------------------------------------------------- #
+# The config-read masking seam (PHASE0-TODO #4) — regression for the relabel
+# --------------------------------------------------------------------------- #
+def test_config_read_failure_cannot_be_masked_by_flex_section_successes():
+    """Same run: config read fails BEFORE the section stores succeed (the real order).
+
+    Under the old 'ibkr_flex:config' label the three later successes superseded the
+    failure most-recent-wins inside the ibkr_flex verdict slot — the failure was in
+    fetch_log but invisible on §5. Under 'config_read:*' the row is its own non-data
+    source: it no longer competes in (or pollutes) the ibkr_flex slot at all, and the
+    data verdict reports what is true — the data sections DID store.
+    """
+    rows = [
+        _fetch("config_read:sleeve_shares", "failure", "2026-07-06T20:30:01+00:00", "read timeout"),
+        _fetch("ibkr_flex:positions", "success", "2026-07-06T20:30:05+00:00"),
+        _fetch("ibkr_flex:trades", "success", "2026-07-06T20:30:06+00:00"),
+        _fetch("ibkr_flex:cash", "success", "2026-07-06T20:30:07+00:00"),
+    ]
+    out = {s["source"]: s["status"] for s in _aggregate_sources(rows)}
+    assert out == {"ibkr_flex": "success"}  # data verdict true; no config_read slot invented
+
+
+def test_config_read_failure_cannot_redden_a_healthy_flex_feed_later():
+    """The inverse masking: a config failure FRESHER than the section rows (e.g. the
+    sections' next scheduled run hasn't happened yet) must not flip ibkr_flex red —
+    the old label did exactly that until the row scrolled out of the scan window."""
+    rows = [
+        _fetch("ibkr_flex:positions", "success", "2026-07-05T20:30:05+00:00"),
+        _fetch("config_read:sleeve_shares", "failure", "2026-07-06T09:00:00+00:00", "blip"),
+    ]
+    out = {s["source"]: s["status"] for s in _aggregate_sources(rows)}
+    assert out == {"ibkr_flex": "success"}
+
+
+def test_old_label_documents_the_masking_seam_this_relabel_closes():
+    """With the retired 'ibkr_flex:config' label, the same-run rows DID mask the
+    failure — kept as executable documentation of why the relabel exists."""
+    rows = [
+        _fetch("ibkr_flex:config", "failure", "2026-07-06T20:30:01+00:00", "read timeout"),
+        _fetch("ibkr_flex:positions", "success", "2026-07-06T20:30:05+00:00"),
+    ]
+    out = {s["source"]: s["status"] for s in _aggregate_sources(rows)}
+    assert out == {"ibkr_flex": "success"}  # the failure vanished from the verdict — the seam
 
 
 # --------------------------------------------------------------------------- #
@@ -101,9 +147,11 @@ def test_health_command_excludes_non_data_but_keeps_raw_survivors(monkeypatch):
         {"source": "tiingo:TSLA", "status": "success", "created_at": "2026-06-21T14:10:00+00:00", "error": None},
         {"source": "telegram_webhook", "status": "failure", "created_at": "2026-06-21T07:04:00+00:00", "error": "404"},
         {"source": "pipeline:av_news", "status": "failure", "created_at": "2026-06-14T09:35:00+00:00", "error": "x"},
+        {"source": "config_read:sleeve_shares", "status": "failure", "created_at": "2026-06-21T20:30:00+00:00", "error": "blip"},
     ]
     monkeypatch.setattr(handlers, "get_client", lambda: FakeHealthClient(rows))
     out = handlers.handle_health({})
     assert "telegram_webhook" not in out          # the false-red is gone from /health
     assert "pipeline" not in out                  # pipeline:* dropped too (same category)
+    assert "config_read" not in out               # infra category, not §5 data (PHASE0-TODO #4)
     assert "tiingo:TSLA" in out                   # surviving source still rendered RAW (no collapse)

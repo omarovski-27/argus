@@ -39,7 +39,24 @@ ingestion layer is built, or a real bug appears. Tracked here so they aren't los
   USD-converted; add `currency text default 'USD'` (+ an FX rule if JD amounts are ever stored).
 - **Ref:** blueprint §0, §4 (contributions), §5.
 
-## 4. `ibkr_flex:config` read-failure is masked in the §5 Source-Health verdict
+## 4. `ibkr_flex:config` read-failure is masked in the §5 Source-Health verdict — ✅ relabeled (completion run 2026-07-06)
+- **Shipped:** the filed design, verbatim — the config read now logs as
+  `config_read:sleeve_shares` (its own logical source), and `config_read` joined
+  `shared.sources.NON_DATA_SOURCES`, so the row can neither be superseded inside the
+  `ibkr_flex` verdict slot (the mask) nor redden a healthy feed later (the 56314e2
+  stale-red class). Both surfaces (digest §5 verdict + `/health`) inherit via the shared
+  frozenset. Regression tests: `tests/test_source_health.py`
+  (`test_config_read_failure_cannot_be_masked_by_flex_section_successes`,
+  `..._cannot_redden_a_healthy_flex_feed_later`, and the old-label seam kept as
+  executable documentation). No migration needed (label-only change).
+- **Where config-read failures surface (the deferred decision, decided):** `fetch_log`
+  is the forensic channel — the row is always written; classification degrades to
+  "no active sleeve" by design (advisory, /override wins). A dedicated infra-health
+  line (distinct from §5 data health) remains future work, tracked below as Wave-3
+  flag-only #1's sibling.
+
+### (original filing, for context)
+## ~~4. `ibkr_flex:config` read-failure is masked in the §5 Source-Health verdict~~
 - **What:** When `_load_sleeve_shares` (ingestion/ibkr_flex.py) hits a config-read *exception*, it
   writes a `fetch_log` row `ibkr_flex:config = failure` (Law 7: logged), then degrades to "no active
   sleeve". But that row is **masked in the §7/§5 verdict**: `_aggregate_sources` (digest/bundle.py)

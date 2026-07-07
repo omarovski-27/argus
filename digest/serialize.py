@@ -29,7 +29,7 @@ if __name__ == "__main__" and __package__ in (None, ""):
 
 from datetime import date
 
-from shared.event_filter import EVENT_FILTER_RULE_TEXT, triggers_event_filter
+from shared.event_filter import event_filter_phrase, triggers_event_filter
 
 _NEWS_TOP_N = 18    # watchlist + broad-market news fed to the digest
 _RETAIL_TOP_N = 8   # Reddit retail-chatter items (sentiment signal only)
@@ -228,7 +228,7 @@ def _headlines_block(headlines: list, news_top: int, retail_top: int) -> str:
     return "\n".join(lines)
 
 
-def _calendar_block(calendar: list) -> str:
+def _calendar_block(calendar: list, generated_for: str | None) -> str:
     if not calendar:
         return "CALENDAR (next 14 days)\n  none on record"
     lines = []
@@ -237,9 +237,11 @@ def _calendar_block(calendar: list) -> str:
         sym = f" {e['symbol']}" if e.get("symbol") else ""
         # Tag the events that arm the §8 filter (shared predicate, identical to the morning
         # warning) so synthesis states the rule as a grounded fact for EVERY one — FOMC and
-        # NFP alike — instead of parroting it from a single hardcoded prompt example.
+        # NFP alike — instead of parroting it from a single hardcoded prompt example. The
+        # phrase is tense-aware (§7 wording): "IN EFFECT" only within 24h of the digest
+        # date; a forward-dated event "will trigger" the filter — never "active" today.
         rule = (
-            f"  [{EVENT_FILTER_RULE_TEXT}]"
+            f"  [{event_filter_phrase(e.get('date'), generated_for)}]"
             if triggers_event_filter(e)
             else ""
         )
@@ -289,18 +291,21 @@ def _book_block(bundle: dict) -> str:
     cap = cfg.get("weekly_trade_cap")
     # sleeve_shares is the registered unit, derived & frozen at sleeve entry (§8). Absent =
     # no active sleeve yet — render that honestly rather than "None shares" (L2/L7).
+    # §7 wording: every figure sourced from the config table is VOICED as configuration
+    # ("(config)") so neither the model nor the reader can mistake a registered parameter
+    # for a retrieved position — only pos_line above reports actual portfolio state.
     ss = cfg.get("sleeve_shares")
     sleeve_unit = (
-        f"{ss} shares (registered unit; sleeve_pct {_pct(cfg.get('sleeve_pct'))})"
+        f"{ss} shares, registered unit; sleeve_pct {_pct(cfg.get('sleeve_pct'))} (config)"
         if ss is not None
-        else f"no active sleeve (sleeve_pct {_pct(cfg.get('sleeve_pct'))}, derived at entry)"
+        else f"no active sleeve; sleeve_pct {_pct(cfg.get('sleeve_pct'))} (config), derived at entry"
     )
     lines = [
         f"  {pos_line}",
-        f"  Round trips this week: {used} / {cap} (weekly cap).",
+        f"  Round trips this week: {used} / {cap} (weekly cap, config).",
         f"  Cumulative sleeve Δshares: {rt.get('cumulative_delta_shares')}.",
-        f"  Sleeve: {sleeve_unit}; phase {cfg.get('phase')}.",
-        f"  Pre-registered gates: {gate_line}.",
+        f"  Sleeve: {sleeve_unit}; phase {cfg.get('phase')} (config).",
+        f"  Pre-registered gates (config): {gate_line}.",
     ]
     return "BOOK (core untouchable; sleeve-only metrics)\n" + "\n".join(lines)
 
@@ -372,7 +377,7 @@ def serialize_bundle(
         "",
         _headlines_block(bundle.get("headlines") or [], news_top, retail_top),
         "",
-        _calendar_block(bundle.get("calendar") or []),
+        _calendar_block(bundle.get("calendar") or [], bundle.get("generated_for")),
         "",
         _book_block(bundle),
         "",

@@ -169,7 +169,13 @@ def _load_sleeve_shares(run_id: str) -> float | None:
             .execute()
         )
     except Exception as exc:  # noqa: BLE001 — surface, never swallow (Law 7)
-        write_fetch_log("ibkr_flex:config", run_id, "failure", _elapsed_ms(start), str(exc))
+        # Logged under its OWN non-data logical source (PHASE0-TODO #4): the old
+        # 'ibkr_flex:config' label collapsed into the ibkr_flex §5 verdict slot, where
+        # the later positions/trades/cash successes superseded it most-recent-wins —
+        # a masked failure. 'config_read' is in shared.sources.NON_DATA_SOURCES: a
+        # config read is infra, not a §5 data feed; the row stays in fetch_log
+        # (forensics intact) and can no longer touch the ibkr_flex data verdict.
+        write_fetch_log("config_read:sleeve_shares", run_id, "failure", _elapsed_ms(start), str(exc))
         print(f"[ibkr_flex] config.sleeve_shares read FAILED ({exc}); treating as no active sleeve.")
         return None
 

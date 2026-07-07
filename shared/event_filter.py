@@ -24,16 +24,37 @@ morning job warns the day before. Omar decides.
 
 from __future__ import annotations
 
+from datetime import date
+
 # Calendar event types that arm the 24h no-round-trip filter (blueprint §8 / §202). The
 # single definition of WHICH TYPES can arm; the arm DECISION itself is triggers_event_filter.
 # Used as the morning push's coarse fetch filter and inside the predicate below — one tuple,
 # so the type set cannot drift between the two surfaces.
 FILTERED_EVENT_TYPES: tuple[str, ...] = ("fomc", "cpi", "nfp", "earnings", "lockup", "index")
 
-# Plain-fact statement of the rule, rendered VERBATIM in the digest's serialized block so
-# the model states it as-is rather than paraphrasing it into a nudge (Law 1: describes the
-# filter's action, never directs Omar). Mirrors the morning warning's phrasing.
-EVENT_FILTER_RULE_TEXT = "event filter — blocks sleeve round trips within 24h (§8)"
+# Plain-fact statements of the rule, rendered VERBATIM in the digest's serialized block so
+# the model states them as-is rather than paraphrasing into a nudge (Law 1: describes the
+# filter's action, never directs Omar). TWO tenses, chosen by proximity to the digest date
+# (§7 wording): only an event inside the 24h window is a rule IN EFFECT — voicing a
+# next-week event as "filter active" would state a future condition as a present fact (L2).
+EVENT_FILTER_RULE_ACTIVE = "event filter IN EFFECT — sleeve round trips blocked within 24h (§8)"
+EVENT_FILTER_RULE_FORWARD = "will trigger the §8 event filter (blocks sleeve round trips within 24h)"
+
+
+def event_filter_phrase(event_date: str | None, reference_date: str | None) -> str:
+    """The §7 calendar tag for an ARMING event: present tense only inside the 24h window.
+
+    Date-granularity approximation of §8's 24h window: the rule is "in effect" on the
+    reference (digest) date iff the event falls on that date or the next day. Anything
+    later — or any unparseable/missing date — gets the forward phrasing: when proximity
+    cannot be established, the WEAKER claim is the honest one (Law 2). The calendar is
+    forward-only (next 14 days), so past-dated events do not reach this function.
+    """
+    try:
+        delta = (date.fromisoformat(str(event_date)) - date.fromisoformat(str(reference_date))).days
+    except (TypeError, ValueError):
+        return EVENT_FILTER_RULE_FORWARD
+    return EVENT_FILTER_RULE_ACTIVE if 0 <= delta <= 1 else EVENT_FILTER_RULE_FORWARD
 
 
 def triggers_event_filter(event: dict) -> bool:
