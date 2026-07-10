@@ -116,3 +116,21 @@ def test_enforce_raises_with_offending_tokens():
 def test_empty_bundle_serializes_and_still_validates():
     # serialize_bundle({}) renders the all-sections-missing block; grounded text passes.
     assert enforce_grounding("Positions: none on record.", {}) is None
+
+
+def test_in_thousands_suffix_form_grounds_against_full_dollar_block():
+    """Filing-table phrasing: 'X in thousands' == the block's full-dollar figure
+    (the PLTR re-denomination class — same equivalence as 'X thousand')."""
+    block = "operating cash flow 2,100,591,000; total assets 8,900,392,000"
+    assert validate_text("OCF was 2,100,591 in thousands.", block) == []
+    assert validate_text("Total assets of 8,900,392 in thousands.", block) == []
+
+
+def test_in_millions_suffix_form_grounds_too():
+    block = "revenue 82,056,000,000"
+    assert validate_text("Segment revenue was 82,056 in millions.", block) == []
+
+
+def test_in_thousands_form_still_flags_when_nothing_matches():
+    violations = validate_text("SBC was 999,999 in thousands.", "revenue 100")
+    assert [v["token"] for v in violations] == ["999,999"]

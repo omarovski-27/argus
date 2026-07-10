@@ -72,9 +72,11 @@ _NUM_RE = re.compile(
 )
 # Digits attached to a letter (RSI14, SMA200, 10Y-2Y's 2Y) — block side only.
 _EMBEDDED_NUM_RE = re.compile(r"(?<=[A-Za-z])(\d+(?:\.\d+)?)")
-# Magnitude suffix immediately after a number: a bare capital B/M/K/T, or a word form.
+# Magnitude suffix immediately after a number: a bare capital B/M/K/T, or a word form —
+# including the filing-table phrasing "X in thousands"/"X in millions" (same equivalence
+# class as "X thousand": the candidate set only widens, the mantissa candidate remains).
 _SUFFIX_RE = re.compile(
-    r"^(?:(?P<letter>[BMKT])(?![a-zA-Z])|\s?(?P<word>billions?|millions?|thousands?|trillions?|bn|mn|tn)\b)",
+    r"^(?:(?P<letter>[BMKT])(?![a-zA-Z])|\s?(?:in\s+)?(?P<word>billions?|millions?|thousands?|trillions?|bn|mn|tn)\b)",
     re.IGNORECASE,
 )
 _SUFFIX_MULT = {"K": 1e3, "M": 1e6, "B": 1e9, "T": 1e12,
@@ -176,7 +178,7 @@ def _block_facts(block: str) -> tuple[list[float], set[str], set[tuple[int, int,
     block = _ISO_DATE_RE.sub(lambda m: " " * len(m.group(0)), block)
 
     for m in _NUM_RE.finditer(block):
-        for value, _tol in _candidates(m.group(0), block[m.end():m.end() + 12]):
+        for value, _tol in _candidates(m.group(0), block[m.end():m.end() + 16]):
             values.append(value)
     values.extend(float(m.group(1)) for m in _EMBEDDED_NUM_RE.finditer(block))
     return values, iso_dates, date_triples
@@ -225,7 +227,7 @@ def validate_text(full_text: str, block: str) -> list[dict]:
     # 3) Free-standing numbers: any candidate (mantissa / suffix-expanded) within
     #    tolerance of any block value passes.
     for m in _NUM_RE.finditer(text):
-        candidates = _candidates(m.group(0), text[m.end():m.end() + 12])
+        candidates = _candidates(m.group(0), text[m.end():m.end() + 16])
         if not any(abs(v - bv) <= tol for v, tol in candidates for bv in values):
             violations.append({"token": m.group(0), "context": _context(m.start(), m.end())})
     return violations

@@ -69,7 +69,7 @@ _SYSTEM = f"""You are writing an Argus analyst dossier — a fundamental-analysi
 You know these companies from training. Those priors are INADMISSIBLE here: if a specific figure is not printed in the DATA block, it does not exist for this dossier. That includes segment revenue splits, expense line items (R&D, SG&A, restructuring and the like), award and option counts, and any year-over-year change you would have to compute — even when you are confident you remember the true number, citing it is a violation.
 
 Hard rules (all five bind on every dossier):
-1. Grounding. Every number, date, and factual claim comes from the DATA block — filed figures, the derived metrics, the valuation-engine outputs, the filings excerpts, the consensus block, the news lines. Never supply a figure from memory, never estimate, and never compute a new number yourself (no sums, ratios, spreads, differences, growth rates, or percentages of your own — the block pre-computes what you may cite). The FILINGS TEXT excerpts are the ONLY filing content that exists for you: you know these companies from elsewhere, but a figure, date, or breakdown you remember from a filing and cannot point to in the excerpt is a fabrication here — segment revenue splits, option counts, award terms, vesting years and similar fine detail may be cited only if the excerpt itself states them. When you shorten a DATA figure, ROUND it at the last digit you display — never truncate (a cut-off digit makes it a different, wrong number); when unsure, quote the figure as the DATA prints it. Filing tables print figures in the table's stated units (often "in thousands" or "in millions"): cite such figures EXACTLY as the excerpt prints them, with the table's own unit spelled out in words right after the number — NEVER expand them to full-dollar form and never convert between units (thousands to dollars, millions to billions); a figure written with more digits than the excerpt prints is a converted, computed number and a violation. When you want to combine two DATA numbers, cite each separately instead of the sum. When the structure calls for a comparison or trend the DATA does not pre-compute, describe its direction in words (higher/lower, widened/narrowed) with the underlying DATA figures — never a delta you derived. If something the structure calls for is not in the DATA, write "not available" and move on; a named gap is content, a filled gap is a violation.
+1. Grounding. Every number, date, and factual claim comes from the DATA block — filed figures, the derived metrics, the valuation-engine outputs, the filings excerpts, the consensus block, the news lines. Never supply a figure from memory, never estimate, and never compute a new number yourself (no sums, ratios, spreads, differences, growth rates, or percentages of your own — the block pre-computes what you may cite). The FILINGS TEXT excerpts are the ONLY filing content that exists for you: you know these companies from elsewhere, but a figure, date, or breakdown you remember from a filing and cannot point to in the excerpt is a fabrication here — segment revenue splits, option counts, award terms, vesting years and similar fine detail may be cited only if the excerpt itself states them. When you shorten a DATA figure, ROUND it at the last digit you display — never truncate (a cut-off digit makes it a different, wrong number); when unsure, quote the figure as the DATA prints it. Filing tables print figures in the table's stated units (often "in thousands" or "in millions"): cite a table figure with exactly the digits the excerpt prints, naming the unit in words right after it when the table declares one. Figures the DATA prints in full (the fundamentals table, the derived metrics, the valuation block) are cited with their digits as printed — never re-written into another denomination. Both directions, one rule: keep the DATA's own digits; only a unit word may be added beside them. When you want to combine two DATA numbers, cite each separately instead of the sum. When the structure calls for a comparison or trend the DATA does not pre-compute, describe its direction in words (higher/lower, widened/narrowed) with the underlying DATA figures — never a delta you derived. If something the structure calls for is not in the DATA, write "not available" and move on; a named gap is content, a filled gap is a violation.
 2. No instructions. You never tell the reader to buy, sell, enter, exit, add, trim, accumulate, hold, or wait; no entry/exit points, no position sizes, no "attractive here", no timing language. Framework verdicts (cheap/expensive, wonderful/mediocre, fragile/antifragile) are analysis and required; anything that directs an action is forbidden. When the valuation block and the market price disagree, state the disagreement and what each side assumes — the reader owns the conclusion.
 3. Fixed structure. Exactly the stages and sections listed below, in order, every dossier. Keep a stage's header even when its data is thin — say what is missing instead.
 4. Interpretation beside every number. No bare figures: each number you cite gets its plain meaning in the same sentence, on its own scale, from the DATA's own anchors (a peer column, a prior year, a stated range). Do not grade magnitudes the DATA gives no anchor for. Scenario outputs are consequences of their stated assumptions — always present them WITH those assumptions, never as forecasts.
@@ -122,6 +122,52 @@ def _mask_structural(text: str) -> str:
     """Blank the contract's stage references and SEC form names (same-length mask)."""
     masked = _STAGE_REF_RE.sub(lambda m: " " * len(m.group(0)), text)
     return _FORM_NAME_RE.sub(lambda m: " " * len(m.group(0)), masked)
+
+
+# Filing tables declare their denomination ("(in thousands, except percentages)");
+# the model reliably normalizes such figures to full dollars no matter how the prompt
+# forbids it (PLTR: "$684,033,000" for the table's "684,033", three failed runs). A
+# unit-normalized citation is the same equivalence class the gate already accepts via
+# its B/M/K/T suffix tolerance ("16.5B" matches "16,500,000,000") — the failure was
+# only that a bare full-dollar form has no adjacency link back to the table figure.
+# So: for each filings SECTION that declares a denomination, that section's own
+# comma-grouped figures join the grounding whitelist in expanded form. Whitelist-side
+# only (the synthesis input is untouched), derived purely from the frozen pack (a
+# stored row re-derives it — reproducibility holds), and it can only REDUCE false
+# blocks, never admit a figure the excerpt doesn't carry.
+_UNIT_DECL_RE = re.compile(r"\(in (thousands|millions)\b", re.IGNORECASE)
+_COMMA_INT_RE = re.compile(r"(?<![\w.,])\d{1,3}(?:,\d{3})+(?:\.\d+)?")
+_UNIT_MULT = {"thousands": 1e3, "millions": 1e6}
+
+
+def _unit_expansion_whitelist(pack: dict) -> str:
+    """Expanded (×1e3 / ×1e6) forms of figures printed in denomination-declaring
+    filings sections — one number per line, for the grounding gate only."""
+    values: set[float] = set()
+    for form in (pack.get("filings") or {}).values():
+        if not isinstance(form, dict):
+            continue
+        for section in (form.get("sections") or {}).values():
+            text = (section or {}).get("text") or ""
+            units = {m.group(1).lower() for m in _UNIT_DECL_RE.finditer(text)}
+            if not units:
+                continue
+            raw = {float(m.group(0).replace(",", "")) for m in _COMMA_INT_RE.finditer(text)}
+            for unit in units:
+                values.update(v * _UNIT_MULT[unit] for v in raw)
+    return "\n".join(f"{v:,.2f}" for v in sorted(values))
+
+
+def validate_dossier_grounding(dossier_text: str, block: str, pack: dict) -> list[dict]:
+    """The dossier's Law-2 check: structural refs masked, the unit-normalization
+    whitelist appended to the block, then the shared digest.grounding rules. The one
+    chokepoint the gate, the repair pass, and any stored-row probe all share."""
+    extra = _unit_expansion_whitelist(pack)
+    whitelist = block if not extra else (
+        block + "\n\nUNIT-NORMALIZED FILINGS FIGURES (grounding whitelist only — "
+        "the synthesis model never sees these lines):\n" + extra
+    )
+    return validate_text(_mask_structural(dossier_text), whitelist)
 
 
 class VerdictParseError(RuntimeError):
@@ -256,7 +302,7 @@ def _verdict_problems(verdicts: dict, valuation: dict) -> list[str]:
     return problems
 
 
-def _draft_problems(dossier_text: str, block: str) -> list[str]:
+def _draft_problems(dossier_text: str, block: str, pack: dict) -> list[str]:
     """Both gates' violations for a DRAFT, as repair-note lines (empty = clean draft).
 
     Pure composition of the two tested validators — this is the repair pass's input,
@@ -264,7 +310,7 @@ def _draft_problems(dossier_text: str, block: str) -> list[str]:
     """
     problems = [
         f"ungrounded figure {v['token']!r} in: ...{v['context']}..."
-        for v in validate_text(_mask_structural(dossier_text), block)
+        for v in validate_dossier_grounding(dossier_text, block, pack)
     ]
     problems += [
         f"instruction-shaped language [{v['rule']}]: ...{v['excerpt']}..."
@@ -330,7 +376,7 @@ def run_dossier(
     # reach store/send.
     try:
         dossier_text, verdicts = parse_verdicts(raw)
-        problems = _draft_problems(dossier_text, block) + _verdict_problems(verdicts, valuation)
+        problems = _draft_problems(dossier_text, block, pack) + _verdict_problems(verdicts, valuation)
     except VerdictParseError as exc:
         problems = [f"the VERDICTS_JSON machine line is invalid: {exc}"]
     if problems:
@@ -366,7 +412,7 @@ def run_dossier(
     _gate(run_id, "law1", lambda: enforce_law1(dossier_text))
 
     def _grounding() -> None:
-        violations = validate_text(_mask_structural(dossier_text), block)
+        violations = validate_dossier_grounding(dossier_text, block, pack)
         if violations:
             listed = "; ".join(f"{v['token']!r} ({v['context']!r})" for v in violations[:6])
             raise RuntimeError(

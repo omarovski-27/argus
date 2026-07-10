@@ -69,12 +69,50 @@ def test_draft_problems_composes_both_gates():
         "Revenue was 100 with a 40.0% margin.\n"
         "Framework verdicts rendered. Timing and sizing are yours."
     )
-    assert _draft_problems(clean, block) == []
+    assert _draft_problems(clean, block, {}) == []
     dirty = "Revenue was 137. You should buy before the print."
-    problems = _draft_problems(dirty, block)
+    problems = _draft_problems(dirty, block, {})
     assert any("ungrounded figure '137'" in p for p in problems)
     assert any("instruction-shaped language [advice-verb construction]" in p for p in problems)
     assert any("missing closing line" in p for p in problems)
+
+
+def _pack_with_section(section_text: str) -> dict:
+    return {"filings": {"10k": {"accn": "a", "filed": "2026-02-18",
+                                "sections": {"mdna": {"text": section_text}}}}}
+
+
+def test_unit_normalized_filings_figures_ground():
+    """A thousands-table figure cited in full-dollar form grounds via the expansion
+    whitelist (the PLTR failure class) — but ONLY figures the section actually prints."""
+    from analyst.dossier import validate_dossier_grounding
+    from digest.grounding import validate_text
+
+    section = ("The following table sets forth stock-based compensation "
+               "(in thousands, except percentages):\n total 684,033 and 691,638 ")
+    pack = _pack_with_section(section)
+    block = "FILINGS TEXT\n" + section
+    text = "Stock-based compensation was 684,033,000 dollars."
+    # The raw shared gate flags it; the dossier chokepoint accepts the normalization.
+    assert [v["token"] for v in validate_text(text, block)] == ["684,033,000"]
+    assert validate_dossier_grounding(text, block, pack) == []
+    # A full-dollar figure the section does NOT print still fails.
+    assert validate_dossier_grounding("SBC was 999,999,000 dollars.", block, pack) != []
+
+
+def test_millions_tables_normalize_too_and_undeclared_sections_do_not():
+    from analyst.dossier import validate_dossier_grounding
+
+    millions = _pack_with_section("Revenue by segment (in millions): total 82,056 ")
+    block_m = "FILINGS TEXT\nRevenue by segment (in millions): total 82,056 "
+    assert validate_dossier_grounding(
+        "Segment revenue was 82,056,000,000 dollars.", block_m, millions
+    ) == []
+    undeclared = _pack_with_section("total 684,033 with no unit header anywhere")
+    block_u = "FILINGS TEXT\ntotal 684,033 with no unit header anywhere"
+    assert validate_dossier_grounding(
+        "SBC was 684,033,000 dollars.", block_u, undeclared
+    ) != []
 
 
 @pytest.mark.parametrize(
