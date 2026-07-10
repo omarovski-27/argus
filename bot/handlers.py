@@ -728,7 +728,11 @@ def handle_pulse(message: dict) -> str:
     repo = os.environ.get("GH_REPO")
     pat = os.environ.get("GH_DISPATCH_PAT")
     if not repo or not pat:
-        return "⚠️ Pulse unavailable — GH_REPO / GH_DISPATCH_PAT not configured."
+        # Backtick code spans, not bare names: these identifiers carry THREE
+        # underscores between them, and the webhook sends replies Markdown-parsed —
+        # unbalanced '_' 400s the send, turning this friendly refusal into
+        # "Internal error" (live incident 2026-07-10, webhook-d4ad2a795a51).
+        return "⚠️ Pulse unavailable — `GH_REPO` / `GH_DISPATCH_PAT` not configured."
 
     url = f"{_GITHUB_API_BASE}/repos/{repo}/actions/workflows/{_PULSE_WORKFLOW}/dispatches"
     headers = {
@@ -775,7 +779,9 @@ def handle_analyze(message: dict) -> str:
     repo = os.environ.get("GH_REPO")
     pat = os.environ.get("GH_DISPATCH_PAT")
     if not repo or not pat:
-        return "⚠️ Analyze unavailable — GH_REPO / GH_DISPATCH_PAT not configured."
+        # Backtick code spans — same Markdown-safety rule (and live incident) as
+        # handle_pulse's twin message above.
+        return "⚠️ Analyze unavailable — `GH_REPO` / `GH_DISPATCH_PAT` not configured."
 
     url = f"{_GITHUB_API_BASE}/repos/{repo}/actions/workflows/{_ANALYZE_WORKFLOW}/dispatches"
     headers = {

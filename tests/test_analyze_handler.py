@@ -77,7 +77,11 @@ def test_unconfigured_env_degrades_without_dispatch(monkeypatch):
         lambda *a, **k: pytest.fail("must not dispatch without GH_REPO/GH_DISPATCH_PAT"),
     )
     reply = handlers.handle_analyze({"text": "/analyze TSLA"})
-    assert reply == "⚠️ Analyze unavailable — GH_REPO / GH_DISPATCH_PAT not configured."
+    assert reply == "⚠️ Analyze unavailable — `GH_REPO` / `GH_DISPATCH_PAT` not configured."
+    # Markdown-safety (live incident 2026-07-10): the reply is sent Markdown-parsed;
+    # every '_' must sit inside balanced backtick code spans or Telegram 400s the
+    # send and the user sees "Internal error" instead of this refusal.
+    assert reply.count("`") % 2 == 0 and reply.count("`") >= 2
 
 
 def test_dispatch_failure_surfaces_type_but_never_the_pat(monkeypatch):
