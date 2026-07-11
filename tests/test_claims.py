@@ -118,3 +118,16 @@ def test_enforce_raises_with_violations():
 
 def test_empty_pack_is_clean():
     assert validate_claims("EPS peaked at 3.61 in FY 2022.", {}) == []
+
+
+def test_superlative_binds_to_nearest_concept_not_a_contrast_clause():
+    # The live GM 2nd false positive: "highest" claims OCF (its max), not the capex
+    # in the contrast clause. capex 8,527 is below its peak but is NOT the claim.
+    pack = _pack()
+    pack["series"]["operating_cash_flow"] = [
+        {"period_end": "2024-12-31", "value": 14.923e9},
+        {"period_end": "2025-12-31", "value": 26.867e9},
+    ]
+    text = ("Operating cash flow reached a record 26,867,000,000 in FY 2025 — the highest "
+            "in the printed series — while capex of 8,527,000,000 was contained.")
+    assert validate_claims(text, pack) == []

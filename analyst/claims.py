@@ -181,6 +181,12 @@ def validate_claims(text: str, pack: dict) -> list[dict]:
         named = [c for c in concepts if any(w in wl for w in c["words"])]
         if not named:
             continue  # superlative not bound to a known series — not checkable
+        # A superlative binds to ONE concept — the one whose value sits nearest the
+        # keyword. Checking EVERY named concept false-flags a contrast clause: "OCF
+        # reached a record 26,867M — the highest — while capex of 9,303M" claims OCF,
+        # not capex (live GM false positive). Resolve each named concept, keep its
+        # nearest value + whether its extremum is cited, then judge only the nearest.
+        bound = None  # (nearest_dist, concept, period, value, extremum_cited)
         for c in named:
             extremum = (max if want_max else min)(v for _, v in c["points"])
             resolved: list[tuple[int, str, float, bool]] = []  # dist, period, value, is_ext
@@ -195,21 +201,28 @@ def validate_claims(text: str, pack: dict) -> list[dict]:
                         resolved.append((dist, pe, v, abs(v - extremum) <= 1e-6))
                         break
             if not resolved:
-                continue  # superlative names the concept but cites no series value
-            if any(is_ext for *_, is_ext in resolved):
-                continue  # the true extremum IS cited in the window — correct
-            dist, mp, mv, _ = min(resolved, key=lambda t: t[0])
-            ext_period = next((pe for pe, v in c["points"] if abs(v - extremum) <= 1e-6), "?")
-            violations.append({
-                "concept": c["label"],
-                "direction": "max" if want_max else "min",
-                "asserted_value": _disp(mv, c["pct"]),
-                "asserted_period": mp,
-                "actual_value": _disp(extremum, c["pct"]),
-                "actual_period": ext_period,
-                "excerpt": text[max(0, sm.start() - _CONTEXT_CHARS): sm.end() + _CONTEXT_CHARS]
-                .replace("\n", " ").strip(),
-            })
+                continue  # names the concept but cites no series value
+            near = min(resolved, key=lambda t: t[0])
+            extremum_cited = any(is_ext for *_, is_ext in resolved)
+            if bound is None or near[0] < bound[0]:
+                bound = (near[0], c, near[1], near[2], extremum_cited)
+        if bound is None:
+            continue
+        _dist, c, mp, mv, extremum_cited = bound
+        if extremum_cited:
+            continue  # the bound concept cites its true extremum in the window — correct
+        extremum = (max if want_max else min)(v for _, v in c["points"])
+        ext_period = next((pe for pe, v in c["points"] if abs(v - extremum) <= 1e-6), "?")
+        violations.append({
+            "concept": c["label"],
+            "direction": "max" if want_max else "min",
+            "asserted_value": _disp(mv, c["pct"]),
+            "asserted_period": mp,
+            "actual_value": _disp(extremum, c["pct"]),
+            "actual_period": ext_period,
+            "excerpt": text[max(0, sm.start() - _CONTEXT_CHARS): sm.end() + _CONTEXT_CHARS]
+            .replace("\n", " ").strip(),
+        })
     return violations
 
 
