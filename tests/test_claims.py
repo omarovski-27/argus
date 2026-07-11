@@ -131,3 +131,13 @@ def test_superlative_binds_to_nearest_concept_not_a_contrast_clause():
     text = ("Operating cash flow reached a record 26,867,000,000 in FY 2025 — the highest "
             "in the printed series — while capex of 8,527,000,000 was contained.")
     assert validate_claims(text, pack) == []
+
+
+def test_superlative_does_not_bind_across_a_sentence_boundary():
+    # The live GM 3rd false positive: "trough" refers to operating margin in its own
+    # sentence; "Net margin peaked" is the NEXT sentence and must not be pulled in.
+    pack = _pack()
+    text = ("Operating margin fell to 4.0% in FY 2025; for context, the series trough is "
+            "negative 9.0% in FY 2017. Net margin then recovered.")
+    # Net margin isn't even claimed here; operating margin cites its own trough — clean.
+    assert validate_claims(text, pack) == []

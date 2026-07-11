@@ -81,8 +81,24 @@ _SUFFIX_RE = re.compile(
 _SUFFIX_MULT = {"billion": 1e9, "bn": 1e9, "b": 1e9, "million": 1e6, "mn": 1e6, "m": 1e6,
                 "thousand": 1e3, "k": 1e3, "trillion": 1e12, "tn": 1e12, "t": 1e12}
 
-_WINDOW = 95          # chars each side of the superlative keyword
 _CONTEXT_CHARS = 55
+# A superlative claims something within ITS OWN sentence. Scoping to the sentence (not a
+# fixed char window) is what stops a claim binding to a concept in an ADJACENT sentence —
+# the live GM class "...the series trough is -19.9% in FY 2012. Net margin peaked..." where
+# a ±char window pulled "net margin" across the period into an operating-margin claim.
+# Split on . ! ? followed by whitespace/EOL (so a decimal point mid-number never splits)
+# or a newline.
+_SENT_END_RE = re.compile(r"[.!?](?=\s|$)|\n")
+
+
+def _sentence_span(text: str, kw_start: int, kw_end: int) -> tuple[int, int]:
+    """(start, end) of the sentence containing the keyword at [kw_start, kw_end)."""
+    start = 0
+    for m in _SENT_END_RE.finditer(text[:kw_start]):
+        start = m.end()
+    nxt = _SENT_END_RE.search(text, kw_end)
+    end = nxt.start() if nxt else len(text)
+    return start, end
 # A negative value spoken in words or a leading minus/dash just before the number, so
 # "the trough of negative 19.9%" resolves to the stored -0.199 (else the extremum goes
 # unrecognized and a nearby positive value is mis-flagged — the live GM false positive).
@@ -175,7 +191,7 @@ def validate_claims(text: str, pack: dict) -> list[dict]:
 
     for sm in _SUPERLATIVE_RE.finditer(text):
         want_max = sm.group(1).lower() in _MAX_SET
-        lo, hi = max(0, sm.start() - _WINDOW), sm.end() + _WINDOW
+        lo, hi = _sentence_span(text, sm.start(), sm.end())
         window = text[lo:hi]
         wl = window.lower()
         named = [c for c in concepts if any(w in wl for w in c["words"])]
