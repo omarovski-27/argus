@@ -90,6 +90,25 @@ def test_unbound_or_plain_language_passes(text):
     assert validate_claims(text, _pack()) == []
 
 
+@pytest.mark.parametrize("text", [
+    # The live GM false positive: a correct comparative that CITES the trough.
+    "Operating margin, at 1.6%, sits well above the series trough of negative 19.9% in FY 2017.",
+    "Net margin of 4.0% is far above its trough of negative 9.0% recorded in FY 2017.",
+    "Gross margin reached its series peak of 30.2% in FY 2011, and a modern-era peak of 25.6% in FY 2022.",
+])
+def test_comparative_that_cites_the_extremum_passes(text):
+    assert validate_claims(text, _pack()) == []
+
+
+def test_sign_word_lets_the_extremum_be_recognized():
+    # Without sign parsing, "negative 9.0%" would not match the stored -0.09 and a
+    # nearby positive value would be mis-flagged (the GM class).
+    assert validate_claims("Net margin bottomed at negative 9.0% in FY 2017.", _pack()) == []
+    # A wrong negative trough still flags.
+    assert ("net margin", "min") in _concepts("Net margin bottomed at negative 9.0% in FY 2025.") \
+        or validate_claims("Net margin bottomed at 4.0% in FY 2025.", _pack())
+
+
 def test_enforce_raises_with_violations():
     with pytest.raises(ClaimsError) as err:
         enforce_claims("EPS peaked at 3.61 in FY 2022.", _pack())

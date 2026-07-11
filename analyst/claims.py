@@ -83,6 +83,10 @@ _SUFFIX_MULT = {"billion": 1e9, "bn": 1e9, "b": 1e9, "million": 1e6, "mn": 1e6, 
 
 _WINDOW = 95          # chars each side of the superlative keyword
 _CONTEXT_CHARS = 55
+# A negative value spoken in words or a leading minus/dash just before the number, so
+# "the trough of negative 19.9%" resolves to the stored -0.199 (else the extremum goes
+# unrecognized and a nearby positive value is mis-flagged — the live GM false positive).
+_NEG_BEFORE_RE = re.compile(r"(?:negative|minus|[-–−])\s*$", re.IGNORECASE)
 
 
 class ClaimsError(RuntimeError):
@@ -149,12 +153,19 @@ def _candidate_values(token: str, tail: str, is_pct: bool) -> list[tuple[float, 
     return [(value, tol)]
 
 
+def _disp(value: float, is_pct: bool) -> str:
+    return f"{value * 100:.1f}%" if is_pct else f"{value:,.2f}"
+
+
 def validate_claims(text: str, pack: dict) -> list[dict]:
     """Every unsupported superlative in ``text`` (empty list = clean). Pure.
 
-    For each superlative operator, resolve the NEAREST number in its window to the
-    concept named in that window; if the number is a real point of that concept's
-    series but not its extremum in the asserted direction, flag it.
+    For each superlative, for each concept named in its window, resolve EVERY number in
+    the window (sign-aware) to that concept's series. If the true extremum is among the
+    resolved values, the claim cites it correctly and PASSES — this is what makes a
+    legitimate comparative ("1.6%, well above the trough of negative 19.9%") clean. Only
+    when no resolved value is the extremum AND a non-extremum value is bound to the
+    superlative is it flagged (a mid-series value dressed as the peak/low).
     """
     concepts = [{**c, "points": _points(pack, c["src"])} for c in _CONCEPTS]
     concepts = [c for c in concepts if c["points"]]
@@ -170,38 +181,35 @@ def validate_claims(text: str, pack: dict) -> list[dict]:
         named = [c for c in concepts if any(w in wl for w in c["words"])]
         if not named:
             continue  # superlative not bound to a known series — not checkable
-        # Nearest resolving (concept, point) to the keyword.
-        best = None  # (distance, concept, matched_value, matched_period)
-        for nm in _NUM_RE.finditer(window):
-            tail = window[nm.end(): nm.end() + 12]
-            dist = abs((lo + nm.start()) - sm.start())
-            for c in named:
-                extremum = (max if want_max else min)(v for _, v in c["points"])
+        for c in named:
+            extremum = (max if want_max else min)(v for _, v in c["points"])
+            resolved: list[tuple[int, str, float, bool]] = []  # dist, period, value, is_ext
+            for nm in _NUM_RE.finditer(window):
+                tail = window[nm.end(): nm.end() + 12]
+                sign = -1.0 if _NEG_BEFORE_RE.search(window[max(0, nm.start() - 10): nm.start()]) else 1.0
+                dist = abs((lo + nm.start()) - sm.start())
                 for cand, tol in _candidate_values(nm.group(0), tail, c["pct"]):
-                    hits = [(pe, v) for pe, v in c["points"] if abs(v - cand) <= tol]
-                    if not hits:
-                        continue
-                    is_extremum = any(abs(v - extremum) <= 1e-6 for _, v in hits)
-                    if best is None or dist < best[0]:
-                        best = (dist, c, hits[0], is_extremum, extremum)
-        if best is None:
-            continue
-        _dist, c, (mp, mv), is_extremum, extremum = best
-        if is_extremum:
-            continue  # the claim cites the actual extremum — correct
-        ext_period = next((pe for pe, v in c["points"] if abs(v - extremum) <= 1e-6), "?")
-        disp = (f"{extremum * 100:.1f}%" if c["pct"] else f"{extremum:,.2f}")
-        mv_disp = (f"{mv * 100:.1f}%" if c["pct"] else f"{mv:,.2f}")
-        violations.append({
-            "concept": c["label"],
-            "direction": "max" if want_max else "min",
-            "asserted_value": mv_disp,
-            "asserted_period": mp,
-            "actual_value": disp,
-            "actual_period": ext_period,
-            "excerpt": text[max(0, sm.start() - _CONTEXT_CHARS): sm.end() + _CONTEXT_CHARS]
-            .replace("\n", " ").strip(),
-        })
+                    hits = [(pe, v) for pe, v in c["points"] if abs(v - cand * sign) <= tol]
+                    if hits:
+                        pe, v = hits[0]
+                        resolved.append((dist, pe, v, abs(v - extremum) <= 1e-6))
+                        break
+            if not resolved:
+                continue  # superlative names the concept but cites no series value
+            if any(is_ext for *_, is_ext in resolved):
+                continue  # the true extremum IS cited in the window — correct
+            dist, mp, mv, _ = min(resolved, key=lambda t: t[0])
+            ext_period = next((pe for pe, v in c["points"] if abs(v - extremum) <= 1e-6), "?")
+            violations.append({
+                "concept": c["label"],
+                "direction": "max" if want_max else "min",
+                "asserted_value": _disp(mv, c["pct"]),
+                "asserted_period": mp,
+                "actual_value": _disp(extremum, c["pct"]),
+                "actual_period": ext_period,
+                "excerpt": text[max(0, sm.start() - _CONTEXT_CHARS): sm.end() + _CONTEXT_CHARS]
+                .replace("\n", " ").strip(),
+            })
     return violations
 
 
