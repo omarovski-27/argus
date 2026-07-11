@@ -7,8 +7,10 @@ The flow (all-or-nothing; an ungated dossier never enters history, Law 2/7):
     -> ONE bounded repair pass when the draft fails a gate (violations named back
        to the model; draft rejection logged as ``analyst:draft``)
     -> parse + validate the VERDICTS block (controlled vocabulary, §2)
-    -> Law-1 lint (analyst/law1.py)          } both fail loud, logged to
-    -> numeric grounding vs the block (Law 2) } fetch_log, blocking the store
+    -> Law-1 lint (analyst/law1.py)             } all fail loud, logged to
+    -> numeric grounding vs the block (Law 2)    } fetch_log, blocking the
+    -> claims-lint: superlatives vs series (L2)  } store (analyst:law1 /
+    -> verdict-consistency vs the valuation      } :grounding / :claims / :verdicts)
     -> store to ``analyses`` (dossier + frozen pack+valuation + verdicts + model)
 
 The synthesis model is config-driven (``config.synthesis_model``); Sonnet is the
@@ -40,6 +42,7 @@ import uuid
 from anthropic import Anthropic
 from dotenv import load_dotenv
 
+from analyst.claims import enforce_claims, validate_claims
 from analyst.data_pack import build_data_pack
 from analyst.law1 import BANNED_PATTERNS, CLOSING_LINE, enforce_law1, validate_law1
 from analyst.serialize import serialize_analysis
@@ -72,7 +75,7 @@ Hard rules (all five bind on every dossier):
 1. Grounding. Every number, date, and factual claim comes from the DATA block — filed figures, the derived metrics, the valuation-engine outputs, the filings excerpts, the consensus block, the news lines. Never supply a figure from memory, never estimate, and never compute a new number yourself (no sums, ratios, spreads, differences, growth rates, or percentages of your own — the block pre-computes what you may cite). The FILINGS TEXT excerpts are the ONLY filing content that exists for you: you know these companies from elsewhere, but a figure, date, or breakdown you remember from a filing and cannot point to in the excerpt is a fabrication here — segment revenue splits, option counts, award terms, vesting years and similar fine detail may be cited only if the excerpt itself states them. When you shorten a DATA figure, ROUND it at the last digit you display — never truncate (a cut-off digit makes it a different, wrong number); when unsure, quote the figure as the DATA prints it. Filing tables print figures in the table's stated units (often "in thousands" or "in millions"): cite a table figure with exactly the digits the excerpt prints, naming the unit in words right after it when the table declares one. Figures the DATA prints in full (the fundamentals table, the derived metrics, the valuation block) are cited with their digits as printed — never re-written into another denomination. Both directions, one rule: keep the DATA's own digits; only a unit word may be added beside them. When you want to combine two DATA numbers, cite each separately instead of the sum. When the structure calls for a comparison or trend the DATA does not pre-compute, describe its direction in words (higher/lower, widened/narrowed) with the underlying DATA figures — never a delta you derived. If something the structure calls for is not in the DATA, write "not available" and move on; a named gap is content, a filled gap is a violation.
 2. No instructions. You never tell the reader to buy, sell, enter, exit, add, trim, accumulate, hold, or wait; no entry/exit points, no position sizes, no "attractive here", no timing language. Framework verdicts (cheap/expensive, wonderful/mediocre, fragile/antifragile) are analysis and required; anything that directs an action is forbidden. When the valuation block and the market price disagree, state the disagreement and what each side assumes — the reader owns the conclusion.
 3. Fixed structure. Exactly the stages and sections listed below, in order, every dossier. Keep a stage's header even when its data is thin — say what is missing instead.
-4. Interpretation beside every number. No bare figures: each number you cite gets its plain meaning in the same sentence, on its own scale, from the DATA's own anchors (a peer column, a prior year, a stated range). Do not grade magnitudes the DATA gives no anchor for. Scenario outputs are consequences of their stated assumptions — always present them WITH those assumptions, never as forecasts.
+4. Interpretation beside every number. No bare figures: each number you cite gets its plain meaning in the same sentence, on its own scale, from the DATA's own anchors (a peer column, a prior year, a stated range). Do not grade magnitudes the DATA gives no anchor for. Scenario outputs are consequences of their stated assumptions — always present them WITH those assumptions, never as forecasts. SUPERLATIVES ARE DATA, NOT INFERENCE: any claim that a figure is a peak, high, low, trough, record, the highest/lowest, or that a series has risen/fallen "since" its extreme must come from the SERIES EXTREMA block, which pre-computes the true peak and trough (period and value) over ALL printed fiscal years. Never promote a recent or salient mid-series value to an extreme — the peak of the printed record is frequently an early year. If SERIES EXTREMA does not carry the concept, do not make the superlative claim at all.
 5. Mark uncertainty. Say explicitly what is stale, missing, estimated by consensus, or resting on a labeled fallback basis (the DATA marks these). Reduced-depth areas are stated as such, plainly.
 
 Structure (stage headers as plain CAPITALS lines):
@@ -313,6 +316,13 @@ def _draft_problems(dossier_text: str, block: str, pack: dict) -> list[str]:
         for v in validate_dossier_grounding(dossier_text, block, pack)
     ]
     problems += [
+        f"unsupported superlative — you called {c['concept']} {c['asserted_value']} "
+        f"({str(c['asserted_period'])[:4]}) the {'peak' if c['direction'] == 'max' else 'low'}, "
+        f"but SERIES EXTREMA shows {c['actual_value']} ({str(c['actual_period'])[:4]}): "
+        f"...{c['excerpt']}..."
+        for c in validate_claims(dossier_text, pack)
+    ]
+    problems += [
         f"instruction-shaped language [{v['rule']}]: ...{v['excerpt']}..."
         for v in validate_law1(dossier_text)
     ]
@@ -420,6 +430,7 @@ def run_dossier(
             )
 
     _gate(run_id, "grounding", _grounding)
+    _gate(run_id, "claims", lambda: enforce_claims(dossier_text, pack))
 
     def _verdicts_gate() -> None:
         problems = _verdict_problems(verdicts, valuation)

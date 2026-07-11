@@ -17,6 +17,8 @@ instructed to say so rather than fill gaps, and the harsh-reader gate checks it.
 
 from __future__ import annotations
 
+from analyst.claims import _CONCEPTS, _points
+
 _SERIES_TABLE_CONCEPTS = (
     ("revenue", "revenue"),
     ("gross_profit", "gross profit"),
@@ -109,6 +111,35 @@ def _metrics_block(metrics: dict) -> str:
     for row in eps[-6:]:
         if row.get("eps") is not None:
             lines.append(f"  EPS (split-adj diluted) FY {row['period_end']}: {row['eps']:.2f}")
+    return "\n".join(lines)
+
+
+def _extrema_block(pack: dict) -> str:
+    """Peak + trough (period, value) per fiscal series — the authoritative anchor for
+    any superlative the dossier makes.
+
+    Mirrors the file's derived-display rule (equity, peer spreads): a comparative the
+    prompt invites — "peaked", "highest", "since its peak" — is pre-computed HERE at the
+    block's own precision, so the model cites the real extremum instead of manufacturing
+    one from a recent salient value (the class the claims-lint enforces). Over the FULL
+    printed series, not just recent years — the systematic error is recency-anchoring.
+    """
+    lines: list[str] = []
+    for c in _CONCEPTS:
+        pts = _points(pack, c["src"])
+        if len(pts) < 2:
+            continue  # a single point has no meaningful peak/trough
+        hi = max(pts, key=lambda t: t[1])
+        lo = min(pts, key=lambda t: t[1])
+        fmt = (lambda v: _pct(v)) if c["pct"] else (
+            (lambda v: f"{v:.2f}") if c["key"] in ("eps",) else (lambda v: _n(v))
+        )
+        lines.append(
+            f"  {c['label']}: peak {fmt(hi[1])} (FY {hi[0][:4]}); "
+            f"trough {fmt(lo[1])} (FY {lo[0][:4]})"
+        )
+    if not lines:
+        return "(no multi-year series — extrema not available)"
     return "\n".join(lines)
 
 
@@ -307,6 +338,9 @@ def serialize_analysis(pack: dict, valuation: dict) -> str:
         + _fy_table(pack.get("series") or {}),
         "DERIVED METRICS (computed by Argus from the filed figures above)\n"
         + _metrics_block(pack.get("metrics") or {}),
+        "SERIES EXTREMA (peak and trough over ALL printed fiscal years — the authoritative\n"
+        "source for any superlative; never call a mid-series value a peak or a low)\n"
+        + _extrema_block(pack),
         "PEER COMPARISON (latest fiscal year each; same filed basis)\n"
         + _peer_block(pack.get("peers") or {}),
         "VALUATION SCENARIOS (deterministic engine output)\n"

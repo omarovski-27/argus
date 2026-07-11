@@ -1,0 +1,212 @@
+"""Argus analyst — the claims-lint (grounded-but-wrong superlatives; L2, post-grounding).
+
+The numeric grounding gate proves every NUMBER traces to the block; ``law1`` proves no
+INSTRUCTION survives. Neither can see a COMPARATIVE claim. "EPS peaked at 3.61 in FY
+2022 and has since fallen" grounds — 3.61 and 2022 are both real pack points — yet is
+false: the pack's EPS series is 3.61 / 4.30 / 2.03 / 1.08, so the peak is 4.30 at FY
+2023. The superlative operator ("peaked") asserts ``3.61 == max(EPS)``; the model
+manufactured an extremum from a mid-series value. That is a distinct Law-2 failure — a
+GENERATED comparative fact — and it gets its own class-level enforcement here, after
+grounding, exactly as grounding runs after synthesis.
+
+Precision-first, mirroring ``law1`` (the harsh-reader recall backstop is the human
+reader, not this gate): a claim FLAGS only when a superlative keyword, a concept
+keyword, and a value that resolves to that concept's own series ALL sit inside one
+window, AND the resolved value is not that concept's extremum in the claimed direction.
+When any leg is missing (a superlative with no value, "the highest single mover" with no
+figure, "filed record" as track-record) the claim is not checkable and is left alone.
+
+The pack (``pack["series"]`` + ``pack["metrics"]``) is the frozen input the dossier was
+synthesized from, so — like grounding reading the frozen bundle — a stored dossier's
+(text, pack) pair reproduces this verdict forever.
+"""
+
+from __future__ import annotations
+
+import re
+
+# --------------------------------------------------------------------------- #
+# Concept registry — where each fiscal series lives in the pack, its prose
+# keywords, and whether it renders as a percentage (margins are stored as
+# fractions but spoken as "25.6%"). label is for the flag message.
+# --------------------------------------------------------------------------- #
+_CONCEPTS: tuple[dict, ...] = (
+    {"key": "revenue", "src": ("series", "revenue", "value"), "pct": False,
+     "label": "revenue", "words": ("revenue", "sales", "top line", "top-line")},
+    {"key": "gross_profit", "src": ("series", "gross_profit", "value"), "pct": False,
+     "label": "gross profit", "words": ("gross profit",)},
+    {"key": "operating_income", "src": ("series", "operating_income", "value"), "pct": False,
+     "label": "operating income", "words": ("operating income", "operating profit")},
+    {"key": "net_income", "src": ("series", "net_income", "value"), "pct": False,
+     "label": "net income", "words": ("net income", "net loss", "net earnings")},
+    {"key": "ocf", "src": ("series", "operating_cash_flow", "value"), "pct": False,
+     "label": "operating cash flow", "words": ("operating cash flow",)},
+    {"key": "capex", "src": ("series", "capex", "value"), "pct": False,
+     "label": "capex", "words": ("capex", "capital expenditure", "capital spend")},
+    {"key": "shares", "src": ("series", "shares_diluted", "value"), "pct": False,
+     "label": "diluted shares", "words": ("diluted share", "share count", "shares outstanding")},
+    {"key": "eps", "src": ("metrics", "eps_history", "eps"), "pct": False,
+     "label": "EPS", "words": ("eps", "earnings per share", "per-share earnings")},
+    {"key": "fcf", "src": ("metrics", "fcf_proxy", "fcf"), "pct": False,
+     "label": "free cash flow", "words": ("free cash flow", "fcf", "owner earnings", "owner-earnings")},
+    {"key": "gross_margin", "src": ("metrics", "margins", "gross_margin"), "pct": True,
+     "label": "gross margin", "words": ("gross margin",)},
+    {"key": "operating_margin", "src": ("metrics", "margins", "operating_margin"), "pct": True,
+     "label": "operating margin", "words": ("operating margin",)},
+    {"key": "net_margin", "src": ("metrics", "margins", "net_margin"), "pct": True,
+     "label": "net margin", "words": ("net margin",)},
+)
+
+# Superlative operators, by the direction of the extremum they assert. Kept
+# HIGH-PRECISION: "record" alone is excluded (track record / on record / filed
+# record); only "record high"/"record low" carry an extremum, handled by the
+# high/low members. Each addition needs a passing counter-example in the tests.
+_MAX_WORDS = ("peaked", "peak", "highest", "all-time high", "record high", "strongest",
+              "largest", "biggest", "maximum")
+_MIN_WORDS = ("lowest", "trough", "bottomed", "weakest", "smallest", "record low",
+              "minimum")
+_SUPERLATIVE_RE = re.compile(
+    r"\b(" + "|".join(re.escape(w) for w in (_MAX_WORDS + _MIN_WORDS)) + r")\b",
+    re.IGNORECASE,
+)
+_MAX_SET = {w.lower() for w in _MAX_WORDS}
+
+# A free-standing number in the claim window (sign, comma groups, decimals).
+_NUM_RE = re.compile(r"(?<![\w.,])[-+]?(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+\.\d+|\d+)")
+_SUFFIX_RE = re.compile(
+    r"^\s*(?:(?P<pct>%|\s*percent)|(?P<word>billion|million|thousand|trillion|bn|mn|tn)\b"
+    r"|(?P<letter>[BMKT])(?![A-Za-z]))",
+    re.IGNORECASE,
+)
+_SUFFIX_MULT = {"billion": 1e9, "bn": 1e9, "b": 1e9, "million": 1e6, "mn": 1e6, "m": 1e6,
+                "thousand": 1e3, "k": 1e3, "trillion": 1e12, "tn": 1e12, "t": 1e12}
+
+_WINDOW = 95          # chars each side of the superlative keyword
+_CONTEXT_CHARS = 55
+
+
+class ClaimsError(RuntimeError):
+    """A dossier asserts an extremum a pack series does not support (Law 2)."""
+
+    def __init__(self, violations: list[dict]):
+        self.violations = violations
+        listed = "; ".join(
+            f"[{v['concept']} {v['direction']}] {v['excerpt']!r} — actual "
+            f"{v['actual_value']} at {v['actual_period']}"
+            for v in violations[:6]
+        )
+        super().__init__(
+            f"dossier failed the claims-lint: {len(violations)} superlative(s) not "
+            f"supported by the pack series: {listed}"
+        )
+
+
+def _points(pack: dict, src: tuple) -> list[tuple[str, float]]:
+    """(period_end, value) pairs for one concept, dropping None/undated rows."""
+    container, key, field = src
+    rows = ((pack.get(container) or {}).get(key)) or []
+    out: list[tuple[str, float]] = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        v, pe = r.get(field), r.get("period_end")
+        if v is not None and pe:
+            try:
+                out.append((str(pe), float(v)))
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+def _decimals(raw: str) -> int:
+    body = raw.split(".", 1)
+    return len(body[1]) if len(body) > 1 else 0
+
+
+def _candidate_values(token: str, tail: str, is_pct: bool) -> list[tuple[float, float]]:
+    """(value, tolerance) candidates for a text number, scale-aware.
+
+    A '%'/'percent' suffix (or a pct concept) divides by 100; a B/M/K/T word or
+    letter suffix multiplies. Tolerance is half a unit of the last displayed digit,
+    scaled through the same factor — so "25.6%" matches a stored 0.256 and "8,527
+    million" matches 8,527,000,000.
+    """
+    value = abs(float(token.lstrip("+-").replace(",", "")))
+    tol = 0.5 * (10.0 ** -_decimals(token)) + 1e-9
+    m = _SUFFIX_RE.match(tail)
+    pct = is_pct
+    mult = 1.0
+    if m:
+        if m.group("pct"):
+            pct = True
+        else:
+            key = (m.group("word") or m.group("letter")).lower()
+            mult = _SUFFIX_MULT.get(key, 1.0)
+    if pct:
+        return [(value / 100.0, tol / 100.0)]
+    if mult != 1.0:
+        return [(value * mult, tol * mult), (value, tol)]
+    return [(value, tol)]
+
+
+def validate_claims(text: str, pack: dict) -> list[dict]:
+    """Every unsupported superlative in ``text`` (empty list = clean). Pure.
+
+    For each superlative operator, resolve the NEAREST number in its window to the
+    concept named in that window; if the number is a real point of that concept's
+    series but not its extremum in the asserted direction, flag it.
+    """
+    concepts = [{**c, "points": _points(pack, c["src"])} for c in _CONCEPTS]
+    concepts = [c for c in concepts if c["points"]]
+    if not concepts:
+        return []
+    violations: list[dict] = []
+
+    for sm in _SUPERLATIVE_RE.finditer(text):
+        want_max = sm.group(1).lower() in _MAX_SET
+        lo, hi = max(0, sm.start() - _WINDOW), sm.end() + _WINDOW
+        window = text[lo:hi]
+        wl = window.lower()
+        named = [c for c in concepts if any(w in wl for w in c["words"])]
+        if not named:
+            continue  # superlative not bound to a known series — not checkable
+        # Nearest resolving (concept, point) to the keyword.
+        best = None  # (distance, concept, matched_value, matched_period)
+        for nm in _NUM_RE.finditer(window):
+            tail = window[nm.end(): nm.end() + 12]
+            dist = abs((lo + nm.start()) - sm.start())
+            for c in named:
+                extremum = (max if want_max else min)(v for _, v in c["points"])
+                for cand, tol in _candidate_values(nm.group(0), tail, c["pct"]):
+                    hits = [(pe, v) for pe, v in c["points"] if abs(v - cand) <= tol]
+                    if not hits:
+                        continue
+                    is_extremum = any(abs(v - extremum) <= 1e-6 for _, v in hits)
+                    if best is None or dist < best[0]:
+                        best = (dist, c, hits[0], is_extremum, extremum)
+        if best is None:
+            continue
+        _dist, c, (mp, mv), is_extremum, extremum = best
+        if is_extremum:
+            continue  # the claim cites the actual extremum — correct
+        ext_period = next((pe for pe, v in c["points"] if abs(v - extremum) <= 1e-6), "?")
+        disp = (f"{extremum * 100:.1f}%" if c["pct"] else f"{extremum:,.2f}")
+        mv_disp = (f"{mv * 100:.1f}%" if c["pct"] else f"{mv:,.2f}")
+        violations.append({
+            "concept": c["label"],
+            "direction": "max" if want_max else "min",
+            "asserted_value": mv_disp,
+            "asserted_period": mp,
+            "actual_value": disp,
+            "actual_period": ext_period,
+            "excerpt": text[max(0, sm.start() - _CONTEXT_CHARS): sm.end() + _CONTEXT_CHARS]
+            .replace("\n", " ").strip(),
+        })
+    return violations
+
+
+def enforce_claims(text: str, pack: dict) -> None:
+    """Raise :class:`ClaimsError` unless every superlative is series-supported."""
+    violations = validate_claims(text, pack)
+    if violations:
+        raise ClaimsError(violations)
