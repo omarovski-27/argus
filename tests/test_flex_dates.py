@@ -46,3 +46,19 @@ def test_garbage_and_empty_yield_none():
     assert _flex_date(None) is None
     assert _flex_date("not-a-date") is None
     assert _flex_datetime("13/13/2026") is None  # no 13th month in either convention
+
+
+# --------------------------------------------------------------------------- #
+# SendRequest transient classifier (the recurring journal red: 07-03/06/10)
+# --------------------------------------------------------------------------- #
+def test_send_request_transient_classifier():
+    from ingestion.ibkr_flex import _is_transient_send_error
+
+    # The exact live message that reddened the daily job three times.
+    assert _is_transient_send_error(None, "Statement could not be generated at this time. Please try again shortly.")
+    assert _is_transient_send_error("1019", "generation in progress")
+    assert _is_transient_send_error("1018", "too many requests")
+    # Non-transient failures fail fast — NOT retried.
+    assert not _is_transient_send_error("1015", "Invalid token")
+    assert not _is_transient_send_error(None, "Query is invalid")
+    assert not _is_transient_send_error(None, None)

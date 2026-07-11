@@ -30,7 +30,11 @@ from datetime import date, datetime, timedelta, timezone
 
 from bot.telegram import send_message
 from shared.db import get_client
-from shared.event_filter import FILTERED_EVENT_TYPES, triggers_event_filter
+from shared.event_filter import (
+    EVENT_FILTER_WARNING,
+    FILTERED_EVENT_TYPES,
+    triggers_event_filter,
+)
 from shared.fetch_logger import write_fetch_log
 
 # Default weekly cap (§8); overridable via config.weekly_trade_cap. (§8 arming itself is
@@ -109,7 +113,7 @@ def check_and_warn() -> None:
         messages: list[str] = []
         if events:
             labels = ", ".join(sorted({_event_label(event) for event in events}))
-            messages.append(f"⚠️ {labels} tomorrow — event filter active. No round trips.")
+            messages.append(f"⚠️ {labels} tomorrow — {EVENT_FILTER_WARNING}.")
         if trips_this_week >= weekly_cap:
             messages.append(
                 f"⛔ {trips_this_week}/{weekly_cap} trades this week — weekly cap reached."

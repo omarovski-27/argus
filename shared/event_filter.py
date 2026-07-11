@@ -39,6 +39,10 @@ FILTERED_EVENT_TYPES: tuple[str, ...] = ("fomc", "cpi", "nfp", "earnings", "lock
 # next-week event as "filter active" would state a future condition as a present fact (L2).
 EVENT_FILTER_RULE_ACTIVE = "event filter IN EFFECT — sleeve round trips blocked within 24h (§8)"
 EVENT_FILTER_RULE_FORWARD = "will trigger the §8 event filter (blocks sleeve round trips within 24h)"
+# The morning-warning push (bot.event_filter_check) fires the afternoon before an arming
+# event — always inside the 24h window — so it states the rule in the active tense. Kept
+# HERE so all §8 rule wording has one home (the §7 single-source goal); the push imports it.
+EVENT_FILTER_WARNING = "event filter active — no sleeve round trips within 24h (§8)"
 
 
 def event_filter_phrase(event_date: str | None, reference_date: str | None) -> str:

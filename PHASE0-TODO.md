@@ -19,15 +19,14 @@ ingestion layer is built, or a real bug appears. Tracked here so they aren't los
   deleted 2026-07-01).
 - **Ref:** blueprint §4 (~line 104), §2 item 4, §7.
 
-## 2. `transactions.ext_id` (Flex dedup id)
+## 2. `transactions.ext_id` (Flex dedup id) — ✅ SHIPPED
 - **What:** A unique external id from IBKR Flex (execution / trade id) on `transactions`.
-- **Why deferred:** Not named in §4's column list; it is an ingestion-idempotency concern.
-- **Why it matters:** The daily 20:30 UTC Flex pull re-fetches overlapping windows. Without a unique
-  external id, re-ingestion creates **duplicate** transaction rows (or relies on a fragile
-  (exec_time, symbol, qty, price) heuristic). Duplicates corrupt round-trip pairing and the sleeve
-  Δshares metric.
-- **Action when building ingestion:** add `ext_id text` + `unique (ext_id)`, and upsert on it.
-- **Ref:** blueprint §4 (transactions), §5 (Flex daily), plan "Design decisions" section.
+- **Shipped:** `transactions.ext_id` + `unique(ext_id)` applied
+  (`20260619120000_round_trips_sell_ext_id.sql`); `ingestion/ibkr_flex._store_trades`
+  upserts on `ext_id` (`ibExecID`), and `_store_cash` on `contributions.ext_id`
+  (`transactionID`) — the daily overlapping-window re-pull is idempotent (verified live:
+  repeated pulls store 0 duplicate rows). The two 2026-06-26 fills carry their ibExecIDs.
+- **Ref:** blueprint §4 (transactions), §5 (Flex daily).
 
 ## 3. `contributions.currency` (JD vs USD)
 - **What:** A currency column on `contributions` (plus a normalization rule).

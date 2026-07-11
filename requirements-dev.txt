@@ -1,4 +1,6 @@
-# Test-only dependencies — NOT installed by the GitHub Actions jobs (they use
-# requirements.txt). Install locally with:  pip install -r requirements-dev.txt
--r requirements.txt
+# Test-only dependencies. The suite imports pandas / pandas-ta / anthropic (the
+# ingestion + digest closure), so it needs the FULL jobs requirements, not the lean
+# Vercel closure — `pip install -r requirements-dev.txt && pytest` must pass from a
+# clean env. CI installs the same set (tests.yml: `-r requirements-jobs.txt pytest`).
+-r requirements-jobs.txt
 pytest

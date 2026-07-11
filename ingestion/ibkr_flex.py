@@ -206,34 +206,70 @@ def _classify(side: str, magnitude: float | None, sleeve_shares: float | None) -
 # --------------------------------------------------------------------------- #
 # Retrieval (two-step protocol)
 # --------------------------------------------------------------------------- #
+# SendRequest transients IBKR clears within a minute or two ("Statement could not be
+# generated at this time. Please try again shortly.", codes 1009/1018/1019). These come
+# back as an HTTP-200 body with Status=Fail, so the shared fetcher's transport retry
+# never sees them — and the daily journal job went red on exactly this on 2026-07-03,
+# 07-06 and 07-10, all identical. A bounded retry here absorbs the transient; a genuine
+# bad-token / bad-query failure is NOT transient and still fails fast on the first pass.
+_SEND_RETRY_MAX = 4
+_SEND_RETRY_WAIT_SECONDS = 20.0
+_SEND_TRANSIENT_MARKERS = ("try again", "generat", "at this time", "please retry", "temporar")
+_SEND_TRANSIENT_CODES = frozenset({"1009", "1018", "1019"})
+
+
+def _is_transient_send_error(code: str | None, message: str | None) -> bool:
+    """True if a SendRequest Fail status is the retryable 'try again shortly' class. Pure."""
+    if (code or "").strip() in _SEND_TRANSIENT_CODES:
+        return True
+    msg = (message or "").lower()
+    return any(marker in msg for marker in _SEND_TRANSIENT_MARKERS)
+
+
+def _send_request(token: str, query_id: str, run_id: str) -> tuple[str, str]:
+    """SendRequest -> (ReferenceCode, Url), retrying the transient generation failure.
+
+    Raises FetchError after ``_SEND_RETRY_MAX`` attempts, or immediately on a
+    non-transient Fail (bad token/query) or a missing ReferenceCode/Url.
+    """
+    last_detail = "unknown error"
+    for attempt in range(1, _SEND_RETRY_MAX + 1):
+        send_xml = fetch_with_retry(
+            FLEX_SEND_REQUEST_URL,
+            {},
+            {"t": token, "q": query_id, "v": _FLEX_VERSION},
+            "ibkr_flex:send",
+            run_id,
+            parse="text",
+        )
+        send_root = ET.fromstring(send_xml)
+        if send_root.findtext("Status") == "Success":
+            reference_code = send_root.findtext("ReferenceCode")
+            statement_url = send_root.findtext("Url")
+            if not reference_code or not statement_url:
+                raise FetchError("ibkr_flex:send", "SendRequest missing ReferenceCode/Url")
+            return reference_code, statement_url
+        code = send_root.findtext("ErrorCode")
+        message = send_root.findtext("ErrorMessage")
+        last_detail = message or code or "unknown error"
+        if _is_transient_send_error(code, message) and attempt < _SEND_RETRY_MAX:
+            print(f"[ibkr_flex] SendRequest transient ({last_detail}); "
+                  f"retry {attempt}/{_SEND_RETRY_MAX - 1} in {_SEND_RETRY_WAIT_SECONDS:g}s")
+            time.sleep(_SEND_RETRY_WAIT_SECONDS)
+            continue
+        break
+    raise FetchError("ibkr_flex:send", f"SendRequest failed: {last_detail}")
+
+
 def _retrieve_statement(token: str, query_id: str, run_id: str) -> ET.Element:
     """Run SendRequest -> GetStatement and return the ``<FlexStatement>`` element.
 
     Raises:
-        FetchError: on transport outage (from the shared fetcher), a Fail status,
-            or a statement that never finishes generating.
+        FetchError: on transport outage (from the shared fetcher), a non-transient Fail
+            status (bad token/query), a transient that outlasts the bounded retry, or a
+            statement that never finishes generating.
     """
-    send_xml = fetch_with_retry(
-        FLEX_SEND_REQUEST_URL,
-        {},
-        {"t": token, "q": query_id, "v": _FLEX_VERSION},
-        "ibkr_flex:send",
-        run_id,
-        parse="text",
-    )
-    send_root = ET.fromstring(send_xml)
-    if send_root.findtext("Status") != "Success":
-        detail = (
-            send_root.findtext("ErrorMessage")
-            or send_root.findtext("ErrorCode")
-            or "unknown error"
-        )
-        raise FetchError("ibkr_flex:send", f"SendRequest failed: {detail}")
-
-    reference_code = send_root.findtext("ReferenceCode")
-    statement_url = send_root.findtext("Url")
-    if not reference_code or not statement_url:
-        raise FetchError("ibkr_flex:send", "SendRequest missing ReferenceCode/Url")
+    reference_code, statement_url = _send_request(token, query_id, run_id)
 
     for attempt in range(1, _GENERATION_MAX_TRIES + 1):
         statement_xml = fetch_with_retry(

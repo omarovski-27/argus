@@ -213,7 +213,16 @@ def _valuation_block(valuation: dict) -> str:
     mos = valuation.get("margin_of_safety_pct")
     lines.append(f"  bear-weighted estimate: {weighted:.2f}/share")
     if mos is None:
-        lines.append("  margin of safety: not computable (no current price)")
+        # The engine returns None for TWO reasons: no price, OR a non-positive
+        # bear-weighted estimate with a valid price. Attribute the real one (the old
+        # single message mislabeled a negative-value case as "no price").
+        if price is None:
+            lines.append("  margin of safety: not computable (no current price)")
+        else:
+            lines.append(
+                f"  margin of safety: not computable — the bear-weighted estimate "
+                f"{weighted:.2f} is non-positive, so a percentage is meaningless"
+            )
     elif mos < -1.0:
         # Display cap: a deeply negative MoS reads as noise ("-1020%"); the honest
         # render is the relationship, with both anchors printed (both then ground).
