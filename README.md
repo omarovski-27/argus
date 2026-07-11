@@ -84,6 +84,13 @@ Every line of code answers to these; violating one is a correctness bug, not a s
   serialized block the model saw (`digest/grounding.py`). A figure the model computed
   or remembered fails the run. It has caught real violations: a model-derived "80 bps"
   spread in an early digest; model-summed segment revenue in the first dossier runs.
+- **The claims-lint (grounded-but-wrong).** The grounding gate proves every *number* is
+  real; it cannot see a false *comparative*. "EPS peaked at 3.61 in FY 2022" cites two
+  real pack points yet is false (the peak is 4.30 in FY 2023) — a generated comparative
+  fact. `analyst/claims.py` pre-computes each series' true peak and trough into the block
+  and then enforces that any superlative cites the actual extremum, catching the model's
+  systematic habit of promoting a recent salient value to an all-time high. Precision-
+  first: it flagged 7 real slips across three stored dossiers and zero on the clean ones.
 - **The Law-1 lint.** A regex gate over instruction *shapes* ("you should buy",
   "allocate 30%", "stop-loss at…") blocks a dossier from store/send, while analytical
   vocabulary ("share buybacks", "sell-side consensus", "exit multiple") passes — each
@@ -101,13 +108,17 @@ Every line of code answers to these; violating one is a correctness bug, not a s
 **Built and live:** the spine (16-table schema, wrapped ingestion for Tiingo / FRED /
 IBKR Flex / Alpha Vantage / Reuters & Reddit RSS, local indicators); the weekly digest +
 pulse with grounding gate; the Telegram bot (webhook with fail-closed auth, instant
-commands); the journal engine (round-trip pairing, checkpoint pushes, `/felt`
-annotations); the analyst module end to end (SEC facts mapper, data packs, valuation
-engine, dossier synthesis with both gates, `/analyze` wiring).
+commands `/book /journal /felt /pulse /analyze /skip /health /override`); the journal
+engine (round-trip pairing, checkpoint pushes, `/felt` annotations, and the interactive
+sleeve-entry writer that derives and freezes the registered unit on typed confirmation);
+the analyst module end to end (SEC facts mapper, data packs, valuation engine, dossier
+synthesis behind four gates — Law-1, grounding, claims, verdict-consistency — and
+`/analyze` wiring). Live dossiers span the framework space: GM (cheap value), TSLA and
+PLTR (expensive glamour, one mediocre and one wonderful business).
 
 **Not built:** Phase 3 quant models (Monte Carlo etc.); Phase 4 agentic add-ons. The
-sleeve itself has no open position yet, so sleeve-entry derivation and split
-auto-adjustment writes are dormant by design.
+sleeve itself has no open position yet, so the split auto-adjustment write and the
+journal's gate verdicts stay dormant by design until the operator registers a sleeve.
 
 ## Stack
 
