@@ -189,7 +189,8 @@ def _valuation_block(valuation: dict) -> str:
         "company. Present them only together with their assumptions.",
         f"  base year: revenue {_n(inp['revenue_0']['value'])} (FY end {inp['revenue_0']['period_end']}), "
         f"diluted shares (split-adj) {_n(inp['shares_0']['value'])}",
-        f"  owner earnings (basis {inp['owner_earnings_0']['basis']}): "
+        f"  owner earnings (the cash the business generates after maintaining itself; "
+        f"basis {inp['owner_earnings_0']['basis']}): "
         f"{_n(inp['owner_earnings_0']['owner_earnings'])} — owner-earnings margin "
         f"{_pct(inp.get('owner_earnings_margin_0'))}",
         f"  current price: {_n(inp['price'], 2)} ({inp['price_date']})",
@@ -244,7 +245,8 @@ def _valuation_block(valuation: dict) -> str:
     rd = valuation.get("reverse_dcf") or {}
     if rd.get("implied_revenue_cagr") is not None:
         lines.append(
-            f"  reverse-DCF: the current price implies {_pct(rd['implied_revenue_cagr'])} annual "
+            f"  reverse-DCF (working backwards from today's price to the growth it "
+            f"assumes): the current price implies {_pct(rd['implied_revenue_cagr'])} annual "
             f"revenue growth for {grid['horizon_years']:g} years at the base-case margin, multiple "
             f"and dilution"
         )

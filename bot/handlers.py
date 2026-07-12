@@ -764,7 +764,7 @@ def handle_analyze(message: dict) -> str:
     """
     parts = (message.get("text") or "").split()
     if len(parts) < 2:
-        return "Usage: /analyze TICKER (e.g. /analyze TSLA)"
+        return "Usage: /analyze TICKER [full] (e.g. /analyze TSLA, or /analyze TSLA full)"
     ticker = parts[1].split("@")[0].upper()
     if not _TICKER_RE.match(ticker):
         # Deliberately does NOT echo the input: the reply goes through a
@@ -774,6 +774,10 @@ def handle_analyze(message: dict) -> str:
     # Class shares: SEC's ticker map and yfinance both use the dash form (BRK-B),
     # so the dot form users naturally type is normalized before dispatch.
     ticker = ticker.replace(".", "-")
+    # Optional delivery length: '/analyze TSLA full' delivers the full stored dossier;
+    # anything else leaves it to config.dossier_length (brief by default, §3). Empty
+    # string => the workflow's declared default => config resolves it in the job.
+    length = parts[2].lower() if len(parts) > 2 and parts[2].lower() in ("full", "brief") else ""
 
     load_dotenv(override=True)
     repo = os.environ.get("GH_REPO")
@@ -789,10 +793,11 @@ def handle_analyze(message: dict) -> str:
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
-    body = {"ref": "main", "inputs": {"ticker": ticker}}
+    body = {"ref": "main", "inputs": {"ticker": ticker, "length": length}}
     try:
         response = httpx.post(url, headers=headers, json=body, timeout=_HTTP_TIMEOUT_SECONDS)
         response.raise_for_status()
     except httpx.HTTPError as exc:
         return f"⚠️ Couldn't trigger the dossier run ({type(exc).__name__}). Check /health."
-    return f"Building dossier for {ticker}, ~5 min ⏳"
+    kind = "full dossier" if length == "full" else "dossier"
+    return f"Building {kind} for {ticker}, ~5 min ⏳"

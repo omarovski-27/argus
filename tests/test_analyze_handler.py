@@ -40,8 +40,22 @@ def test_dispatches_analyze_workflow_with_ticker_and_acks(dispatch_env):
     assert len(dispatch_env) == 1
     call = dispatch_env[0]
     assert call["url"].endswith("/repos/omarovski-27/argus/actions/workflows/analyze.yml/dispatches")
-    assert call["json"] == {"ref": "main", "inputs": {"ticker": "TSLA"}}
+    # length defaults to '' (empty) — the job then resolves config.dossier_length (§3).
+    assert call["json"] == {"ref": "main", "inputs": {"ticker": "TSLA", "length": ""}}
     assert call["headers"]["Authorization"] == "Bearer test-pat"
+
+
+def test_full_flag_requests_full_delivery(dispatch_env):
+    reply = handlers.handle_analyze({"text": "/analyze tsla full"})
+    assert reply == "Building full dossier for TSLA, ~5 min ⏳"
+    assert dispatch_env[0]["json"]["inputs"] == {"ticker": "TSLA", "length": "full"}
+
+
+def test_unknown_third_token_is_ignored_and_length_stays_empty(dispatch_env):
+    # A stray trailing token is not a length flag — it must not become one.
+    reply = handlers.handle_analyze({"text": "/analyze tsla please"})
+    assert reply == "Building dossier for TSLA, ~5 min ⏳"
+    assert dispatch_env[0]["json"]["inputs"]["length"] == ""
 
 
 def test_class_share_tickers_normalize_to_the_sec_dash_form(dispatch_env):
@@ -54,7 +68,7 @@ def test_class_share_tickers_normalize_to_the_sec_dash_form(dispatch_env):
 
 def test_missing_argument_returns_usage_without_dispatch(dispatch_env):
     reply = handlers.handle_analyze({"text": "/analyze"})
-    assert reply == "Usage: /analyze TICKER (e.g. /analyze TSLA)"
+    assert reply == "Usage: /analyze TICKER [full] (e.g. /analyze TSLA, or /analyze TSLA full)"
     assert dispatch_env == []
 
 

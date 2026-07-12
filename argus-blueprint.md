@@ -18,7 +18,7 @@ Omar (Data Engineer, Amman; Python/Power BI; has shipped MacrosTracker Telegram 
 
 ## 1. Operating Laws (unchanged from v1)
 
-1. **Information, never instruction.** No Argus output may say buy/sell/safe-to-trade or recommend timing.
+1. **Information, never instruction.** No Argus output may say buy/sell/safe-to-trade or recommend timing. *Amended 2026-07-12 (Omar): Analyst dossiers render a framework-derived bottom-line rating (see analyst-module §2). Timing and sizing remain excluded. All other surfaces unchanged.*
 2. **Facts are retrieved, never generated.** Every date/number traces to a stored source row. LLM synthesizes; never supplies facts from memory.
 3. **Free-tier only.** Any paid input requires a new explicit decision. (X/Twitter permanently excluded.)
 4. **Preparedness over prediction.** Forward calendar is first-class; direction-calling is banned.

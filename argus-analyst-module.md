@@ -9,6 +9,7 @@
 
 - **Law 2 (facts retrieved, never generated) is everything here.** LLMs hallucinate financials from memory. Every number in a dossier comes from a pulled filing or API response, cited to its source. The LLM interprets; the pipeline supplies.
 - **Law 1 adapted:** the module renders *framework verdicts* on the business and its price (cheap/expensive, quality, fragility) — that is analysis. It never issues timing or sizing instructions ("buy now," "enter at $X," "put 30% in"). The capital decision is Omar's.
+  - **Amended 2026-07-12 (Omar).** The dossier additionally renders a single **bottom-line rating** — ATTRACTIVE / MIXED / UNATTRACTIVE, always suffixed *"at current price"* — as the framework's own summary judgment. This is *not* free-form model prose: it is a **deterministic mapping** (`analyst/rating.py`, §2) from the three lens verdicts, so it cannot drift with the model's mood and is fully reproducible from the stored verdicts. It is **injected after** synthesis *and after* the Law-1 lint, so the gate keeps banning recommendation language in model-generated text while the framework's own coded rating passes through. Timing and sizing remain excluded — the rating states worth-at-a-price, never when to act or how much to hold. This amendment is scoped to the dossier alone; the weekly digest, sleeve, and journal surfaces stay fully L1.
 - **Law 4 adapted:** no single-point forecasts. All forward views are scenario ranges with explicit assumptions, plus reverse-DCF extraction of what the current price implies. Graham, Buffett, and Taleb all demand this.
 
 ---
@@ -69,6 +70,21 @@ Analyst targets and estimates (Finnhub/yfinance), short interest, recent narrati
 | **Graham** | CHEAP / FAIR / EXPENSIVE + margin of safety % | Price vs. conservative intrinsic range |
 | **Buffett** | {Wonderful / Good / Mediocre} business at a {Discount / Fair / Premium} price | Quality score × price paid |
 | **Taleb** | FRAGILE / ROBUST / ANTIFRAGILE + ruin list | Stage 6 audit |
+| **Bottom line** *(amended 2026-07-12)* | **ATTRACTIVE / MIXED / UNATTRACTIVE** "at current price" | Deterministic map of the three lenses above — see the derivation rule |
+
+**Bottom-line rating (deterministic, code — never the model).** `analyst/rating.py` exposes a pure `derive_rating(graham, buffett_quality, buffett_price, taleb) -> Rating`. Controlled vocabulary, exhaustive: **ATTRACTIVE / MIXED / UNATTRACTIVE** (rendered with the suffix *"at current price"*). Mapping rules, applied in order:
+
+1. `graham == EXPENSIVE` → **UNATTRACTIVE** — price fails regardless of quality (the Buffett discipline: a wonderful business is not a buy at any price).
+2. `graham == CHEAP` **and** `taleb != FRAGILE` **and** `buffett_quality ∈ {Wonderful, Good}` → **ATTRACTIVE** — quality holds, fragility is manageable, price sits below conservative value.
+3. everything else → **MIXED**, with the disagreeing lens named in the render (e.g. "cheap but ruin-exposed" for CHEAP + FRAGILE).
+
+The rating and its inputs are stored in `analyses.verdicts` as `rating` + `rating_basis` (the lens verdicts it was derived from), so the bottom line re-derives forever from the stored row (Law 2). Render templates are injected by the pipeline (not written by the model), placed as the dossier's first line and inside the verdict block:
+
+- **UNATTRACTIVE:** *"Bottom line: by these frameworks, {T} is not worth buying at today's price of ${px} — {reason from the failing lens}."*
+- **ATTRACTIVE:** *"Bottom line: by these frameworks, {T} is attractive at today's price of ${px} — quality holds, fragility is manageable, and the price sits below conservative value."*
+- **MIXED:** *"Bottom line: the frameworks disagree on {T} at ${px} — {tension}. No clean call; the disagreement itself is the finding."*
+
+The Law-1 lint still bans buy/sell/timing/sizing language in **model-generated** text; the bottom-line sentence is injected *after* the lint pass, from the mapper, so the gate never has to whitelist free-form recommendation prose.
 
 Plus three honesty sections:
 - **What would change this verdict** (explicit falsifiers — e.g., "ROIC drops below 10% for two consecutive years")

@@ -15,6 +15,10 @@ on:
         description: 'Ticker to analyze (e.g. TSLA)'
         required: true
         default: 'TSLA'
+      length:
+        description: "Delivery length: 'brief', 'full', or '' to use config.dossier_length"
+        required: false
+        default: ''
 
 jobs:
   run:
@@ -42,9 +46,13 @@ jobs:
       # shell line. A workflow_dispatch input is user input (the webhook shape-gates
       # it, but this workflow can also be dispatched by hand): env-var passing keeps
       # a hostile string inert instead of becoming shell syntax.
-      - run: python -m analyst.dossier "$TICKER" --send
+      # LENGTH is passed as --length only when non-empty; empty => the dossier resolves
+      # config.dossier_length in-job (§3). Both ride in quoted env vars, never
+      # interpolated into the shell line (a workflow_dispatch input is user input).
+      - run: python -m analyst.dossier "$TICKER" --send ${LENGTH:+--length "$LENGTH"}
         env:
           TICKER: ${{ github.event.inputs.ticker }}
+          LENGTH: ${{ github.event.inputs.length }}
       # Fail-loud push (Law 7 / §12): a red dossier run must reach Telegram, not just
       # a GitHub e-mail — especially a gate rejection, which is a designed outcome.
       - name: Telegram alert on failure
