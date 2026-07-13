@@ -307,6 +307,16 @@ def _book_block(bundle: dict) -> str:
         f"  Sleeve: {sleeve_unit}; phase {cfg.get('phase')} (config).",
         f"  Pre-registered gates (config): {gate_line}.",
     ]
+    # Signal Lab (Law 1 Amendment #2): a labelled EXPERIMENT line — a hypothesis under
+    # test, shadow-scored, never an instruction. Its figures are frozen in bundle['signal']
+    # so they self-ground; a pending ledger renders a state-only line with no figures.
+    from siglab.render import render_signal_line
+
+    sig = bundle.get("signal")
+    if sig:
+        lines.append("  " + render_signal_line(sig))
+    else:
+        lines.append("  🧪 Signal v1 (experiment): backfill pending — no record yet.")
     return "BOOK (core untouchable; sleeve-only metrics)\n" + "\n".join(lines)
 
 

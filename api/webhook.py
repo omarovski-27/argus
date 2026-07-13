@@ -46,6 +46,7 @@ from bot.handlers import (  # noqa: E402 — after the sys.path bootstrap above
     handle_journal,
     handle_override,
     handle_pulse,
+    handle_signal,
     handle_skip,
     handle_today,
 )
@@ -58,12 +59,13 @@ from bot.webhook_auth import chat_ok, secret_ok  # noqa: E402
 from shared.fetch_logger import write_fetch_log  # noqa: E402
 
 _UNKNOWN_REPLY = (
-    "Unknown command. Try /today /book /journal /felt /pulse /analyze /skip /health /override"
+    "Unknown command. Try /today /signal /book /journal /felt /pulse /analyze /skip /health /override"
 )
 
 # Command word → handler. Each handler is (message: dict) -> str.
 _COMMANDS = {
     "/today": handle_today,
+    "/signal": handle_signal,
     "/pulse": handle_pulse,
     "/analyze": handle_analyze,
     "/book": handle_book,

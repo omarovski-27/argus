@@ -39,6 +39,10 @@ from shared.event_filter import (
     triggers_event_filter,
 )
 from shared.sources import is_non_data_source
+from siglab.job import read_ledger
+from siglab.ledger import compute_stats
+from siglab.registry import load_signal
+from siglab.render import render_signal_full, render_signal_line
 
 # --- config-driven constants, with documented Phase-0 fallbacks ----------------- #
 # The $100K goal (§0 / §13). Read from config.target_usd when present so it stays a
@@ -479,6 +483,28 @@ def _sleeve_status_line(config: dict[str, Any]) -> str:
     return "*Sleeve:* not yet registered — no active sleeve."
 
 
+def _signal_stats(client):
+    """(stats, blob) from the persisted ledger, or (None, blob) when absent/pending.
+
+    Degrades gracefully: a missing ``signal_ledger`` table (pre-migration) or an empty
+    ledger (pre-backfill) returns None stats, and the caller renders a labelled
+    'backfill pending' line — the 🧪 experiment label always shows."""
+    blob = load_signal(client)
+    try:
+        rows = read_ledger(client)
+    except Exception:  # noqa: BLE001 — table missing pre-migration; render pending, never crash
+        rows = []
+    return (compute_stats(rows, blob) if rows else None), blob
+
+
+def _signal_pending_line(blob: dict) -> str:
+    """The labelled line shown before any ledger record exists (still no advice)."""
+    return (
+        f"🧪 Signal {blob.get('version', 'v1')} (experiment): registered "
+        f"{blob.get('registered_at')}, backfill pending — no record yet."
+    )
+
+
 def handle_today(message: dict) -> str:
     """Render the 'Today' trade-context card (deterministic, no LLM). ``message`` unused.
 
@@ -521,7 +547,29 @@ def handle_today(message: dict) -> str:
     lines.append("")
     lines.append(f"*This week:* {len(trips)}/{cap} round trips (weekly cap).")
     lines.append(_sleeve_status_line(config))
+
+    # Signal Lab (Law 1 Amendment #2): the labelled experimental signal + its record.
+    stats, blob = _signal_stats(client)
+    lines.append("")
+    lines.append("*Signal Lab* (experiment — shadow only, not advice)")
+    lines.append(render_signal_line(stats) if stats else _signal_pending_line(blob))
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+# /signal — full Signal Lab ledger stats on demand (Law 1 Amendment #2)
+# --------------------------------------------------------------------------- #
+def handle_signal(message: dict) -> str:
+    """Render the full Signal Lab ledger (rule, record, gate progress). ``message`` unused.
+
+    Reads the persisted ledger; a labelled 'backfill pending' line when it is empty. Pure
+    information — the render describes the experiment's condition and record and never
+    advises (the same hard no-advice rule as /today, tested in test_signal_render.py)."""
+    client = get_client()
+    stats, blob = _signal_stats(client)
+    if not stats:
+        return "*Signal Lab*\n\n" + _signal_pending_line(blob)
+    return render_signal_full(stats)
 
 
 # --------------------------------------------------------------------------- #

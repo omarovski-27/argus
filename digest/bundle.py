@@ -172,6 +172,23 @@ def _vix_trailing(client) -> dict | None:
     }
 
 
+def _signal_summary(client) -> dict | None:
+    """Frozen Signal Lab stats for the bundle (Law 1 Amendment #2), or None if pending.
+
+    The digest freezes the signal's record so its one-line summary is reproducible from
+    ``bundle_json`` (Law 2) and its figures self-ground in the serialized block. Degrades
+    to None (a labelled 'pending' line) when the ledger table/rows are not yet present."""
+    from siglab.job import read_ledger
+    from siglab.ledger import compute_stats
+    from siglab.registry import load_signal
+
+    try:
+        rows = read_ledger(client)
+    except Exception:  # noqa: BLE001 — table absent pre-migration; freeze None, never crash
+        return None
+    return compute_stats(rows, load_signal(client)) if rows else None
+
+
 def _upcoming_calendar(client, today: date) -> list[dict]:
     """calendar_events from today through +14 days, ordered by date (rendered, never invented)."""
     end = (today + timedelta(days=_CALENDAR_AHEAD_DAYS)).isoformat()
@@ -517,6 +534,7 @@ def assemble_bundle(run_type: str) -> dict:
         "headlines": _recent_headlines(client),
         "positions": positions,
         "round_trips": _round_trips(client, today),
+        "signal": _signal_summary(client),
         "config": config,
         "source_health": _source_health(client, prices, positions, config, today),
         "last_digest_sent_at": _last_digest_sent_at(client),
