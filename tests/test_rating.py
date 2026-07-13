@@ -59,13 +59,18 @@ def test_rating_vocab_mirrors_verdict_vocab():
                            sorted(PRICE_VOCAB), sorted(TALEB_VOCAB))),
 )
 def test_mapping_table_is_exhaustive_and_ordered(graham, quality, price, taleb):
+    # No CAGR passed -> VALUE regime -> v1 rules unchanged (the whole point of the
+    # backward-compatible default: every existing caller keeps its v1 answer).
     r = derive_rating(graham, quality, price, taleb)
     assert r.rating in RATING_VOCAB
     assert r.rating == _expected(graham, quality, taleb)
-    assert r.basis == {
+    assert r.regime == "value"
+    # The four lens verdicts are recorded in the basis (plus regime bookkeeping).
+    assert {k: r.basis[k] for k in ("graham", "buffett_quality", "buffett_price", "taleb")} == {
         "graham": graham, "buffett_quality": quality,
         "buffett_price": price, "taleb": taleb,
     }
+    assert r.basis["regime"] == "value"
 
 
 def test_expensive_is_unattractive_regardless_of_quality():
@@ -189,12 +194,15 @@ def test_finalize_injects_top_and_verdict_block_and_stamps_verdicts():
     assert text.count("Bottom line:") == 2
     # Still ends with the closing line (injection never disturbs it).
     assert text.rstrip().endswith(CLOSING_LINE)
-    # Verdicts carry the rating + its basis for the stored row.
+    # Verdicts carry the rating + its basis for the stored row (value regime — no CAGR
+    # passed through finalize here, so Graham's veto stands, exactly as v1).
     assert verdicts["rating"] == "UNATTRACTIVE"
-    assert verdicts["rating_basis"] == {
+    assert {k: verdicts["rating_basis"][k]
+            for k in ("graham", "buffett_quality", "buffett_price", "taleb")} == {
         "graham": "EXPENSIVE", "buffett_quality": "Good",
         "buffett_price": "Premium", "taleb": "FRAGILE",
     }
+    assert verdicts["rating_basis"]["regime"] == "value"
     # The original verdict fields are preserved.
     assert verdicts["taleb"]["ruin_list"] == ["key-man risk"]
 
@@ -203,3 +211,175 @@ def test_inject_falls_back_to_top_only_without_a_verdict_anchor():
     text = _inject_bottom_line("STAGE 1 — BUSINESS\nProse.\n\nEnd.", "Bottom line: X.")
     assert text.startswith("Bottom line: X.")
     assert text.count("Bottom line:") == 1
+
+
+# --------------------------------------------------------------------------- #
+# MAPPER v2 — the growth-aware regime gate (2026-07-13)
+# --------------------------------------------------------------------------- #
+from analyst.rating import (  # noqa: E402
+    RATING_CONFIG_DEFAULTS,
+    _regime_note,
+    load_rating_config,
+)
+
+_MIN = RATING_CONFIG_DEFAULTS["rating_growth_cagr_min"]   # 0.15
+_EXT = RATING_CONFIG_DEFAULTS["rating_gap_extreme"]        # 3.0
+_OK = RATING_CONFIG_DEFAULTS["rating_gap_ok"]              # 1.5
+
+
+def _r(graham="EXPENSIVE", quality="Good", price="Premium", taleb="ROBUST", *, cagr=None, implied=None):
+    return derive_rating(graham, quality, price, taleb,
+                         revenue_cagr_3y=cagr, implied_growth=implied)
+
+
+# --- regime split ----------------------------------------------------------- #
+def test_below_threshold_is_value_regime_and_keeps_grahams_veto():
+    # 5% growth < 15% threshold -> value regime -> EXPENSIVE vetoes to UNATTRACTIVE
+    # (this is TSLA's real class: a slow grower Graham is entitled to veto).
+    r = _r("EXPENSIVE", cagr=0.05, implied=0.60)
+    assert r.regime == "value" and r.rating == "UNATTRACTIVE"
+    assert "expensive" in r.clause  # Graham's reason, not the gap
+
+
+def test_at_threshold_boundary_is_growth_regime():
+    # CAGR exactly == threshold is growth regime (>=), so Graham is demoted.
+    r = _r("EXPENSIVE", cagr=_MIN, implied=_MIN * 1.2)  # gap 1.2 -> ok band
+    assert r.regime == "growth"
+
+
+def test_growth_regime_demotes_graham():
+    # Same EXPENSIVE Graham verdict, but a modest gap in the growth regime does NOT
+    # force UNATTRACTIVE — the whole point of v2.
+    r = _r("EXPENSIVE", "Wonderful", "Premium", "ROBUST", cagr=0.30, implied=0.35)
+    assert r.regime == "growth" and r.rating == "ATTRACTIVE"
+
+
+# --- gap-ratio bands -------------------------------------------------------- #
+def test_extreme_gap_is_unattractive():
+    # TSLA-shaped arithmetic: implied 78.8% / actual 5.2% ~= 15x >> 3.0 -> UNATTRACTIVE.
+    r = _r("EXPENSIVE", "Good", "Premium", "FRAGILE", cagr=0.20, implied=0.79)
+    assert r.rating == "UNATTRACTIVE"
+    assert r.basis["gap_ratio"] == pytest.approx(0.79 / 0.20)
+    assert "no room for error" in r.clause
+
+
+def test_ok_gap_with_quality_and_nonfragile_is_attractive():
+    r = _r("EXPENSIVE", "Good", "Premium", "ROBUST", cagr=0.30, implied=0.40)  # gap 1.33 <= 1.5
+    assert r.rating == "ATTRACTIVE"
+    assert "within reach" in r.clause
+
+
+def test_ok_gap_but_fragile_is_mixed():
+    r = _r("EXPENSIVE", "Good", "Premium", "FRAGILE", cagr=0.30, implied=0.40)
+    assert r.rating == "MIXED"
+    assert "fragile" in r.clause.lower()
+
+
+def test_ok_gap_but_mediocre_is_mixed():
+    r = _r("EXPENSIVE", "Mediocre", "Premium", "ROBUST", cagr=0.30, implied=0.40)
+    assert r.rating == "MIXED"
+    assert "mediocre" in r.clause.lower()
+
+
+def test_middle_band_gap_is_mixed_demanding_not_extreme():
+    r = _r("EXPENSIVE", "Good", "Premium", "ROBUST", cagr=0.20, implied=0.40)  # gap 2.0
+    assert r.rating == "MIXED"
+    assert "demanding but not extreme" in r.clause
+
+
+# --- exact threshold boundaries --------------------------------------------- #
+def test_gap_exactly_at_extreme_is_unattractive():
+    # cagr >= 0.15 for growth regime; use binary-exact 0.75/0.25 == 3.0 (0.60/0.20
+    # rounds to 2.9999.. in float and would land in the middle band — a real boundary
+    # subtlety, pinned here with values that divide cleanly).
+    r = _r("EXPENSIVE", "Good", "Premium", "ROBUST", cagr=0.25, implied=0.75)  # gap == 3.0
+    assert r.basis["gap_ratio"] == pytest.approx(_EXT)
+    assert r.rating == "UNATTRACTIVE"  # >= is inclusive
+
+
+def test_gap_exactly_at_ok_is_attractive():
+    r = _r("EXPENSIVE", "Good", "Premium", "ROBUST", cagr=0.20, implied=0.30)  # gap == 1.5
+    assert r.basis["gap_ratio"] == pytest.approx(_OK)
+    assert r.rating == "ATTRACTIVE"  # <= is inclusive
+
+
+def test_cagr_floor_engages_below_two_percent():
+    # The 2% denominator floor only bites when the growth threshold itself is set low
+    # enough to admit a sub-2% grower. With a 1% threshold, a 1.5% grower is "growth
+    # regime" yet the denominator floors at 2% so the gap stays finite (spec §1).
+    low = {"rating_growth_cagr_min": 0.01, "rating_gap_extreme": 3.0, "rating_gap_ok": 1.5}
+    r = derive_rating("EXPENSIVE", "Good", "Premium", "ROBUST",
+                      revenue_cagr_3y=0.015, implied_growth=0.10, config=low)
+    assert r.regime == "growth"
+    assert r.basis["gap_ratio"] == pytest.approx(0.10 / 0.02)  # denom floored to 0.02
+    assert r.rating == "UNATTRACTIVE"
+
+
+def test_growth_regime_without_implied_growth_is_mixed_not_a_guess():
+    r = _r("EXPENSIVE", "Good", "Premium", "ROBUST", cagr=0.30, implied=None)
+    assert r.regime == "growth" and r.rating == "MIXED"
+    assert r.basis["gap_ratio"] is None
+    assert "reverse-DCF did not solve" in r.clause
+
+
+# --- basis records the inputs (spec: CAGR + threshold + regime stored) ------ #
+def test_basis_records_cagr_threshold_and_regime():
+    r = _r("EXPENSIVE", "Good", "Premium", "FRAGILE", cagr=0.20, implied=0.79)
+    assert r.basis["revenue_cagr_3y"] == 0.20
+    assert r.basis["growth_cagr_min"] == _MIN
+    assert r.basis["regime"] == "growth"
+    assert r.basis["implied_growth"] == 0.79
+    assert r.basis["gap_extreme"] == _EXT and r.basis["gap_ok"] == _OK
+
+
+# --- the regime note in the render ------------------------------------------ #
+def test_render_states_growth_regime_note():
+    r = _r("EXPENSIVE", "Good", "Premium", "FRAGILE", cagr=0.052, implied=0.79)  # value (5.2%)
+    assert "Rated on value basis." in render_bottom_line(r, "TSLA", 400.0)
+    g = _r("EXPENSIVE", "Wonderful", "Premium", "ROBUST", cagr=0.30, implied=0.35)  # growth
+    line = render_bottom_line(g, "PLTR", 126.0)
+    assert "Rated on growth-adjusted basis" in line
+    assert "revenue grew 30.0%/yr" in line
+
+
+def test_regime_note_helper_directly():
+    assert _regime_note(_r(cagr=None)) == "Rated on value basis."
+    assert "growth-adjusted" in _regime_note(_r(cagr=0.30, implied=0.35))
+
+
+# --- config loader ---------------------------------------------------------- #
+class _CfgClient:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def table(self, _n):
+        return self
+
+    def select(self, *_a):
+        return self
+
+    def in_(self, *_a):
+        return self
+
+    def execute(self):
+        return type("R", (), {"data": self._rows})()
+
+
+def test_load_rating_config_absent_uses_seed_defaults():
+    assert load_rating_config(_CfgClient([])) == RATING_CONFIG_DEFAULTS
+
+
+def test_load_rating_config_reads_present_values():
+    cfg = load_rating_config(_CfgClient([
+        {"key": "rating_growth_cagr_min", "value": 0.10},
+        {"key": "rating_gap_extreme", "value": 4.0},
+    ]))
+    assert cfg["rating_growth_cagr_min"] == 0.10
+    assert cfg["rating_gap_extreme"] == 4.0
+    assert cfg["rating_gap_ok"] == RATING_CONFIG_DEFAULTS["rating_gap_ok"]  # untouched
+
+
+def test_load_rating_config_raises_on_corrupt_value():
+    for bad in (0, -1, "0.2", True, None):
+        with pytest.raises(RuntimeError):
+            load_rating_config(_CfgClient([{"key": "rating_gap_extreme", "value": bad}]))

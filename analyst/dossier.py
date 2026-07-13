@@ -45,7 +45,7 @@ from dotenv import load_dotenv
 from analyst.claims import _points, enforce_claims, validate_claims
 from analyst.data_pack import build_data_pack
 from analyst.law1 import BANNED_PATTERNS, CLOSING_LINE, enforce_law1, validate_law1
-from analyst.rating import rating_from_verdicts, render_bottom_line
+from analyst.rating import load_rating_config, rating_from_verdicts, render_bottom_line
 from analyst.serialize import serialize_analysis
 from digest.grounding import validate_text
 from quant.valuation import run_valuation
@@ -339,20 +339,46 @@ def _inject_bottom_line(text: str, bottom_line: str) -> str:
 
 
 def finalize_dossier(
-    dossier_text: str, verdicts: dict, symbol: str, price: float | None
+    dossier_text: str,
+    verdicts: dict,
+    symbol: str,
+    price: float | None,
+    *,
+    revenue_cagr_3y: float | None = None,
+    implied_growth: float | None = None,
+    rating_config: dict | None = None,
 ) -> tuple[str, dict, str]:
     """Derive the rating, inject its sentence, and stamp verdicts (post-gate step).
 
     Returns (text_with_bottom_line, verdicts_with_rating, rating_token). Pure — the
     caller runs this only AFTER the four gates pass, so the injected recommendation
-    shape never reaches the lint. The rating + its basis are added to ``verdicts`` for
-    the stored row, so the bottom line re-derives forever (Law 2).
+    shape never reaches the lint. ``revenue_cagr_3y`` and ``implied_growth`` (from the
+    frozen pack + valuation) drive the growth-aware regime gate (mapper v2); when
+    absent the mapper stays in the value regime (v1). The rating + its basis are added
+    to ``verdicts`` for the stored row, so the bottom line re-derives forever (Law 2).
     """
-    rating = rating_from_verdicts(verdicts)
+    rating = rating_from_verdicts(
+        verdicts, revenue_cagr_3y=revenue_cagr_3y,
+        implied_growth=implied_growth, config=rating_config,
+    )
     bottom_line = render_bottom_line(rating, symbol, price)
     text = _inject_bottom_line(dossier_text, bottom_line)
     verdicts = {**verdicts, "rating": rating.rating, "rating_basis": rating.rating_basis}
     return text, verdicts, rating.rating
+
+
+def _rating_inputs(pack: dict, valuation: dict) -> tuple[float | None, float | None]:
+    """(realized 3y revenue CAGR, reverse-DCF implied growth) from the frozen pack.
+
+    Both are already-computed, grounded figures — the 3y CAGR from the metrics block,
+    the implied growth from the deterministic valuation engine — so the growth-regime
+    rating is a pure function of frozen state (Law 2), never a fresh computation.
+    """
+    cagr_3y = (((pack.get("metrics") or {}).get("revenue_cagr") or {}).get("3") or {}).get("value")
+    implied = (valuation.get("reverse_dcf") or {}).get("implied_revenue_cagr")
+    cagr_3y = cagr_3y if isinstance(cagr_3y, (int, float)) else None
+    implied = implied if isinstance(implied, (int, float)) else None
+    return cagr_3y, implied
 
 
 # --------------------------------------------------------------------------- #
@@ -730,12 +756,19 @@ def run_dossier(
 
     _gate(run_id, "verdicts", _verdicts_gate)
 
-    # Bottom-line rating: derived by CODE from the gated verdicts and injected here —
-    # after every gate — so the recommendation-shaped sentence never reaches the lint
-    # (module spec §2, amended 2026-07-12). The full text + verdicts now carry it.
+    # Bottom-line rating: derived by CODE from the gated verdicts (+ the growth-aware
+    # regime gate, mapper v2) and injected here — after every gate — so the
+    # recommendation-shaped sentence never reaches the lint (module spec §2, amended
+    # 2026-07-12/13). The full text + verdicts now carry it.
     price = _bottom_line_price(pack, valuation)
-    dossier_text, verdicts, rating = finalize_dossier(dossier_text, verdicts, sym, price)
-    print(f"[dossier] bottom-line rating: {rating} at price {price}.")
+    cagr_3y, implied_growth = _rating_inputs(pack, valuation)
+    rating_config = load_rating_config(client)
+    dossier_text, verdicts, rating = finalize_dossier(
+        dossier_text, verdicts, sym, price,
+        revenue_cagr_3y=cagr_3y, implied_growth=implied_growth, rating_config=rating_config,
+    )
+    print(f"[dossier] bottom-line rating: {rating} at price {price} "
+          f"(regime inputs: cagr3y={cagr_3y}, implied={implied_growth}).")
 
     result = {
         "run_id": run_id,

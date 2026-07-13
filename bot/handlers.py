@@ -31,6 +31,13 @@ from dotenv import load_dotenv
 from postgrest.exceptions import APIError
 
 from shared.db import get_client
+from shared.event_filter import (
+    EVENT_FILTER_RULE_ACTIVE,
+    EVENT_FILTER_RULE_FORWARD,
+    FILTERED_EVENT_TYPES,
+    event_filter_phrase,
+    triggers_event_filter,
+)
 from shared.sources import is_non_data_source
 
 # --- config-driven constants, with documented Phase-0 fallbacks ----------------- #
@@ -41,6 +48,11 @@ from shared.sources import is_non_data_source
 _DEFAULT_TARGET_USD = 100_000.0
 # Pre-registered journal gates (§9). Extracted from config.kill_criteria when seeded.
 _DEFAULT_CHECKPOINTS: tuple[int, ...] = (10, 20, 50)
+# Weekly round-trip cap (§8) fallback when config.weekly_trade_cap is unseeded — matches
+# ingestion/seed_config.py and bot/event_filter_check.py so the /today count never drifts.
+_DEFAULT_WEEKLY_CAP = 2
+# The indicator names /today reads (canonical set from ingestion/indicators.py).
+_TODAY_INDICATORS: tuple[str, ...] = ("sma50", "sma200", "rsi14", "macd", "macd_signal")
 
 # /skip reasons — must match the skip_log.reason CHECK constraint (§4 table 14).
 _SKIP_REASONS: tuple[str, ...] = ("event_filter", "discretion", "other")
@@ -345,6 +357,170 @@ def handle_journal(message: dict) -> str:
         )
     else:
         lines.append(f"*Checkpoint:* all passed (≥ {checkpoints[-1]} trades).")
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+# /today — deterministic trade-context card (blueprint §7 / §8; mapper-v2 sibling)
+#
+# A pure DB render — NO LLM, so it is grounding-exempt by construction (every figure is
+# a stored row, Law 2, with nothing synthesized). Law 1 still binds hard: the card
+# DESCRIBES state (trend, momentum, event-filter, cap, sleeve) and never advises — no
+# good/bad-day, no should/could-trade, no buy/sell/enter/exit language. That exclusion
+# is pinned by tests/test_today_handler.py, the same way the Law-1 lint guards the
+# dossier. Plain-language vocabulary mirrors the dossier brief (terms glossed inline).
+# --------------------------------------------------------------------------- #
+def _week_bounds(today: date) -> tuple[str, str]:
+    """(Monday, Sunday) ISO dates of the calendar week containing ``today`` (UTC).
+
+    Mirrors ``bot.event_filter_check._week_bounds_utc`` so the /today weekly-cap count
+    and the morning-warning cap count use the identical window (no drift).
+    """
+    from datetime import timedelta
+
+    monday = today - timedelta(days=today.weekday())
+    return monday.isoformat(), (monday + timedelta(days=6)).isoformat()
+
+
+def _latest_close(client, symbol: str) -> tuple[str | None, float | None]:
+    """(date, close) of a symbol's most recent ``prices_eod`` row, or (None, None)."""
+    rows = (
+        client.table("prices_eod").select("date,close")
+        .eq("symbol", symbol).order("date", desc=True).limit(1).execute().data or []
+    )
+    if not rows:
+        return None, None
+    return rows[0].get("date"), _to_float(rows[0].get("close"))
+
+
+def _latest_indicators(client, symbol: str) -> dict[str, float | None]:
+    """Latest value per indicator name for a symbol (date-desc, first-seen wins).
+
+    Young tickers are sparse by design (§4): a name simply absent from the map means
+    'not enough history yet', which the render states rather than fabricating a value.
+    """
+    rows = (
+        client.table("indicators").select("date,name,value")
+        .eq("symbol", symbol).in_("name", list(_TODAY_INDICATORS))
+        .order("date", desc=True).limit(60).execute().data or []
+    )
+    out: dict[str, float | None] = {}
+    for row in rows:  # date-desc → the first row seen for a name is its latest value
+        name = row.get("name")
+        if name and name not in out:
+            out[name] = _to_float(row.get("value"))
+    return out
+
+
+def _trend_phrase(close: float | None, sma50: float | None, sma200: float | None) -> str:
+    """Price vs its 50-/200-day average price, in plain relational words (categorical).
+
+    Purely descriptive (Law 1) — states where price sits relative to its averages, never
+    'uptrend'/'bullish'/a call. A bounded, anchored comparison (memory: bounded-
+    categorical is allowed; unbounded-magnitude is not)."""
+    if close is None:
+        return "price not available"
+    above, below = [], []
+    for label, ref in (("50-day", sma50), ("200-day", sma200)):
+        if ref is None:
+            continue
+        (above if close >= ref else below).append(label)
+    if not above and not below:
+        return "no moving-average history yet (young listing)"
+    if above and below:
+        return (
+            f"trading above its {' and '.join(above)} but below its "
+            f"{' and '.join(below)} average price"
+        )
+    if above:
+        return f"trading above its {' and '.join(above)} average price"
+    return f"trading below its {' and '.join(below)} average price"
+
+
+def _momentum_phrase(rsi: float | None, macd: float | None, signal: float | None) -> str:
+    """RSI (glossed 'momentum score, 50 neutral') + MACD-vs-signal as improving/fading."""
+    bits: list[str] = []
+    if rsi is not None:
+        bits.append(f"momentum score {rsi:.0f} (50 is neutral)")
+    if macd is not None and signal is not None:
+        direction = "improving" if macd >= signal else "fading"
+        bits.append(f"trend momentum {direction} (MACD vs its signal line)")
+    return "; ".join(bits) if bits else "momentum not yet available"
+
+
+def _event_filter_line(client, today: date) -> str:
+    """The §8 event-filter state: the nearest arming event + whether it is IN EFFECT.
+
+    Reads the forward calendar and applies the SHARED arm decision
+    (``shared.event_filter``), so /today, the digest and the morning push cannot
+    disagree on what arms the 24h no-round-trip window."""
+    rows = (
+        client.table("calendar_events").select("date,type,symbol,materiality")
+        .gte("date", today.isoformat()).in_("type", list(FILTERED_EVENT_TYPES))
+        .order("date").limit(20).execute().data or []
+    )
+    arming = [row for row in rows if triggers_event_filter(row)]
+    if not arming:
+        return "not active — no arming event on the forward calendar."
+    event = arming[0]
+    label = str(event.get("type") or "").upper()
+    sym = f" ({event['symbol']})" if event.get("symbol") else ""
+    phrase = event_filter_phrase(event.get("date"), today.isoformat())
+    if phrase == EVENT_FILTER_RULE_ACTIVE:
+        return f"IN EFFECT — {label}{sym} within 24h; sleeve round trips blocked (§8)."
+    return f"armed — {label}{sym} on {event.get('date')}; {EVENT_FILTER_RULE_FORWARD}."
+
+
+def _sleeve_status_line(config: dict[str, Any]) -> str:
+    """Sleeve registration status from ``config.sleeve_shares`` (absent = no active sleeve)."""
+    shares = config.get("sleeve_shares")
+    if isinstance(shares, (int, float)) and not isinstance(shares, bool):
+        return f"*Sleeve:* registered — {int(shares)} shares (frozen unit)."
+    return "*Sleeve:* not yet registered — no active sleeve."
+
+
+def handle_today(message: dict) -> str:
+    """Render the 'Today' trade-context card (deterministic, no LLM). ``message`` unused.
+
+    Per watchlist ticker: trend state (price vs 50-/200-day average) and momentum
+    (RSI + MACD direction); then the §8 event-filter state, round trips used this week
+    vs the cap, and sleeve registration. Every figure is a stored row (Law 2); the card
+    describes state and never advises (Law 1)."""
+    client = get_client()
+    config = _load_config()
+    today = _utc_today()
+    watchlist = [s for s in (config.get("watchlist") or []) if isinstance(s, str)]
+
+    lines = [
+        f"*Today* — {today.isoformat()} (UTC)",
+        "Context, not advice — this card describes state; you decide.",
+        "",
+        "*Watchlist*",
+    ]
+    if not watchlist:
+        lines.append("• (no watchlist configured)")
+    for symbol in watchlist:
+        pdate, close = _latest_close(client, symbol)
+        ind = _latest_indicators(client, symbol)
+        trend = _trend_phrase(close, ind.get("sma50"), ind.get("sma200"))
+        momentum = _momentum_phrase(ind.get("rsi14"), ind.get("macd"), ind.get("macd_signal"))
+        asof = f" (as of {pdate})" if pdate else ""
+        lines.append(f"• *{symbol}*{asof}: {trend}. {momentum}.")
+
+    lines.append("")
+    lines.append("*Event filter (§8)*")
+    lines.append(_event_filter_line(client, today))
+
+    monday, sunday = _week_bounds(today)
+    trips = (
+        client.table("round_trips").select("id")
+        .gte("date", monday).lte("date", sunday).execute().data or []
+    )
+    cap_val = config.get("weekly_trade_cap")
+    cap = int(cap_val) if isinstance(cap_val, (int, float)) and not isinstance(cap_val, bool) else _DEFAULT_WEEKLY_CAP
+    lines.append("")
+    lines.append(f"*This week:* {len(trips)}/{cap} round trips (weekly cap).")
+    lines.append(_sleeve_status_line(config))
     return "\n".join(lines)
 
 
