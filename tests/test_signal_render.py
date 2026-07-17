@@ -11,7 +11,13 @@ import pytest
 
 from siglab.ledger import compute_stats
 from siglab.registry import SIGNAL_V1_DEFAULT
-from siglab.render import EXPERIMENT_LABEL, render_signal_full, render_signal_line
+from siglab.render import (
+    EXPERIMENT_LABEL,
+    render_signal_full,
+    render_signal_line,
+    render_signal_today,
+    render_signal_today_pending,
+)
 
 # The hard exclusion (Amendment #2): describes, never advises.
 _BANNED = [
@@ -40,10 +46,29 @@ _LEDGERS = {
 @pytest.mark.parametrize("name", list(_LEDGERS))
 def test_render_never_advises(name):
     stats = compute_stats(_LEDGERS[name], SIGNAL_V1_DEFAULT)
-    for text in (render_signal_line(stats), render_signal_full(stats)):
+    for text in (render_signal_line(stats), render_signal_full(stats), render_signal_today(stats)):
         low = text.lower()
         for pattern in _BANNED:
             assert not re.search(pattern, low), f"{name}: render advised — matched {pattern!r}"
+
+
+def test_today_line_states_condition_and_record():
+    """The compact /today line: today's state + the measured historical frequency, 🧪 label."""
+    stats = compute_stats(_mk("w" * 4 + "l" * 34), SIGNAL_V1_DEFAULT)  # the live backfill shape
+    line = render_signal_today(stats)
+    assert line.startswith(EXPERIMENT_LABEL)
+    assert "days like today won 11% historically" in line   # 4/38 = 10.5% → 11%
+    assert "(n=38, shadow -$841.00)" in line
+    for pattern in _BANNED:
+        assert not re.search(pattern, line.lower())
+
+
+def test_today_pending_line_carries_label():
+    line = render_signal_today_pending(SIGNAL_V1_DEFAULT)
+    assert line.startswith(EXPERIMENT_LABEL)
+    assert "backfill pending" in line
+    for pattern in _BANNED:
+        assert not re.search(pattern, line.lower())
 
 
 @pytest.mark.parametrize("name", list(_LEDGERS))

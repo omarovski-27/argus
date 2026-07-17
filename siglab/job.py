@@ -24,6 +24,8 @@ if __name__ == "__main__" and __package__ in (None, ""):
 import time
 import uuid
 
+from postgrest.exceptions import APIError
+
 from shared.event_filter import FILTERED_EVENT_TYPES, triggers_event_filter
 from siglab.engine import build_ledger_rows
 from siglab.ledger import compute_stats
@@ -110,6 +112,26 @@ def read_ledger(client) -> list[dict]:
     ))
 
 
+# PostgREST's code for "relation not found in the schema cache" — the ledger table before
+# its migration is applied. A KNOWN pending state (the /today card renders 'backfill
+# pending'), NOT a data-integrity failure, so the nightly job skips it rather than red-alerts.
+_MISSING_TABLE_CODE = "PGRST205"
+
+
+def ledger_table_exists(client) -> bool:
+    """True iff ``signal_ledger`` is queryable; False on the pre-migration PGRST205.
+
+    Any other API error propagates (Law 7): only the specific 'table absent' condition is
+    the benign pre-migration state — a permissions or connectivity error must still surface."""
+    try:
+        client.table("signal_ledger").select("date").limit(1).execute()
+        return True
+    except APIError as exc:
+        if getattr(exc, "code", None) == _MISSING_TABLE_CODE:
+            return False
+        raise
+
+
 def _existing_dates(client) -> set[str]:
     rows = _paged(lambda a, b: (
         client.table("signal_ledger").select("date")
@@ -142,6 +164,17 @@ def run_nightly(client, run_id: str | None = None) -> dict:
     start = time.monotonic()
     try:
         rows, warmup, stats = compute_backfill(client)
+        # Pre-migration guard: if the ledger DDL isn't applied yet, this is a known pending
+        # state — skip GREEN (no red alert) so wiring the nightly step is safe before Omar
+        # applies the migration. The first run AFTER it lands backfills the full history
+        # (insert-only-missing) and the /today card lights up with no further action.
+        if not ledger_table_exists(client):
+            write_fetch_log(
+                "signal", run_id, "success", int((time.monotonic() - start) * 1000),
+                "signal_ledger absent (pre-migration) — nightly skipped, no rows written",
+            )
+            print("[signal] nightly: signal_ledger table absent (pre-migration) — skipped, no write.")
+            return stats
         written = write_missing(client, rows)
         # Fail-loud (Law 7): a mature series should always yield a row for the latest
         # priced day. If the newest price date produced no ledger row, an input is

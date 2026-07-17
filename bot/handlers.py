@@ -39,10 +39,16 @@ from shared.event_filter import (
     triggers_event_filter,
 )
 from shared.sources import is_non_data_source
+from siglab.engine import vix_percentile_asof
 from siglab.job import read_ledger
 from siglab.ledger import compute_stats
 from siglab.registry import load_signal
-from siglab.render import render_signal_full, render_signal_line
+from siglab.render import (
+    render_signal_full,
+    render_signal_line,
+    render_signal_today,
+    render_signal_today_pending,
+)
 
 # --- config-driven constants, with documented Phase-0 fallbacks ----------------- #
 # The $100K goal (§0 / §13). Read from config.target_usd when present so it stays a
@@ -505,24 +511,280 @@ def _signal_pending_line(blob: dict) -> str:
     )
 
 
-def handle_today(message: dict) -> str:
-    """Render the 'Today' trade-context card (deterministic, no LLM). ``message`` unused.
+# --------------------------------------------------------------------------- #
+# /today v2 — the default one-glance card (deterministic, no LLM)
+#
+# Six lines a human reads at a glance: overall Conditions (CALM/NORMAL/STORMY), the
+# sleeve ticker's one-word direction, the market benchmarks collapsed to one line, the
+# young listing, the next blocking event, and the labelled experimental signal. The
+# detailed workings live behind `/today full` (`_render_full_card`). Law 1 still binds:
+# every line DESCRIBES state and never advises — pinned by tests/test_today_handler.py.
+# --------------------------------------------------------------------------- #
 
-    Per watchlist ticker: trend state (price vs 50-/200-day average) and momentum
-    (RSI + MACD direction); then the §8 event-filter state, round trips used this week
-    vs the cap, and sleeve registration. Every figure is a stored row (Law 2); the card
-    describes state and never advises (Law 1)."""
-    client = get_client()
-    config = _load_config()
-    today = _utc_today()
+# The tech benchmark in the "Market overall" collapse; everything else on the market line
+# is treated as the broad market (single-user watchlist is TSLA/SPCX/SPY/QQQ).
+_TECH_INDEX = "QQQ"
+_DIR_STRENGTH = {"UP": 2, "MIXED": 1, "DOWN": 0}
+
+# Plain-language names for the arming event types (never the §8/materiality jargon; the
+# card speaks in human terms). Keys mirror shared.event_filter.FILTERED_EVENT_TYPES.
+_FRIENDLY_EVENT = {
+    "fomc": "Fed decision",
+    "cpi": "inflation report (CPI)",
+    "nfp": "jobs report",
+    "earnings": "earnings",
+    "lockup": "lock-up expiry",
+    "index": "index rebalance",
+}
+
+
+def _direction(
+    close: float | None, sma50: float | None, sma200: float | None,
+    macd: float | None, signal: float | None,
+) -> tuple[str, str]:
+    """(word, reason) — a deterministic one-word trend+push read (Law 1: describes only).
+
+    UP iff price is above BOTH moving averages AND momentum is improving; DOWN iff below
+    BOTH and momentum is fading; else MIXED. The reason is plain — no RSI number, no
+    "MACD", no "momentum score" (those stay on `/today full`)."""
+    refs = [r for r in (sma50, sma200) if r is not None]
+    if not refs or close is None:
+        trend_part, trend_up, trend_down = "no trend lines yet", False, False
+    else:
+        trend_up = all(close >= r for r in refs)
+        trend_down = all(close < r for r in refs)
+        trend_part = (
+            "above its trend lines" if trend_up
+            else "below its trend lines" if trend_down
+            else "between its trend lines"
+        )
+    if macd is not None and signal is not None:
+        push_up: bool | None = macd >= signal
+        push_part = "push strengthening" if push_up else "push weakening"
+    else:
+        push_up, push_part = None, "push unclear"
+
+    if trend_up and push_up:
+        return "UP", f"{trend_part}, {push_part}"
+    if trend_down and push_up is False:
+        return "DOWN", f"{trend_part}, {push_part}"
+    return "MIXED", f"{trend_part}, {push_part}"
+
+
+def _direction_line(symbol: str, close: float | None, ind: dict) -> str:
+    """The sleeve ticker's one-glance line: ``*TSLA*: pointing DOWN (…)`` / mixed picture."""
+    word, reason = _direction(
+        close, ind.get("sma50"), ind.get("sma200"), ind.get("macd"), ind.get("macd_signal")
+    )
+    if word == "MIXED":
+        return f"*{symbol}*: a mixed picture ({reason})."
+    return f"*{symbol}*: pointing {word} ({reason})."
+
+
+def _market_line(dirs: dict[str, str]) -> str | None:
+    """Collapse the market benchmarks (SPY/QQQ) into ONE line; None if none present.
+
+    Both same → ``pointing UP`` / ``pointing DOWN`` / ``mixed``. Diverging → the broad
+    market leads and the tech leg is qualified (``pointing up, tech wobbling``)."""
+    if not dirs:
+        return None
+    if len(set(dirs.values())) == 1:
+        word = next(iter(dirs.values()))
+        return "*Market overall*: mixed." if word == "MIXED" else f"*Market overall*: pointing {word}."
+    broad = dirs.get("SPY")
+    tech = dirs.get(_TECH_INDEX)
+    if broad is None or tech is None:  # no clean broad/tech split — state each plainly
+        parts = ", ".join(f"{s} {w.lower()}" for s, w in sorted(dirs.items()))
+        return f"*Market overall*: {parts}."
+    broad_plain = {"UP": "pointing up", "DOWN": "pointing down", "MIXED": "mixed"}[broad]
+    if _DIR_STRENGTH[tech] < _DIR_STRENGTH[broad]:
+        qualifier = "tech wobbling"
+    elif _DIR_STRENGTH[tech] > _DIR_STRENGTH[broad]:
+        qualifier = "tech out in front"
+    else:
+        qualifier = "tech in step"
+    return f"*Market overall*: {broad_plain}, {qualifier}."
+
+
+def _young_line(symbol: str, ind: dict) -> str:
+    """A young listing's plain line — no trend lines yet, just the recent push (Law 1)."""
+    macd, signal, rsi = ind.get("macd"), ind.get("macd_signal"), ind.get("rsi14")
+    if macd is not None and signal is not None:
+        push = "strong" if macd >= signal else "soft"
+    elif rsi is not None:
+        push = "strong" if rsi >= 50 else "soft"
+    else:
+        return f"*{symbol}*: too young for trend lines; still building history."
+    return f"*{symbol}*: too young for trend lines; recent push {push}."
+
+
+def _nearest_arming_event(client, today: date) -> dict | None:
+    """The nearest forward calendar event that arms the sleeve block, or None."""
+    rows = (
+        client.table("calendar_events").select("date,type,symbol,materiality")
+        .gte("date", today.isoformat()).in_("type", list(FILTERED_EVENT_TYPES))
+        .order("date").limit(20).execute().data or []
+    )
+    arming = [row for row in rows if triggers_event_filter(row)]
+    return arming[0] if arming else None
+
+
+def _friendly_event(event: dict) -> str:
+    """A human name for an arming event (never '§8'/'materiality')."""
+    kind = str(event.get("type") or "").lower()
+    if kind == "earnings" and event.get("symbol"):
+        return f"{event['symbol']} earnings"
+    return _FRIENDLY_EVENT.get(kind, kind.upper() or "event")
+
+
+def _sessions_until(event_date: object, today: date) -> int | None:
+    """Trading sessions (weekday proxy) from today to ``event_date``; None if past/unparseable.
+
+    A weekday count is the same date-granularity approximation the §8 24h window uses
+    (shared.event_filter documents it): close enough for a 'within 2 sessions' threshold,
+    and honest about not modelling market holidays."""
+    from datetime import timedelta
+
+    try:
+        ed = date.fromisoformat(str(event_date)[:10])
+    except (TypeError, ValueError):
+        return None
+    if ed < today:
+        return None
+    sessions, cursor = 0, today
+    while cursor < ed:
+        cursor += timedelta(days=1)
+        if cursor.weekday() < 5:
+            sessions += 1
+    return sessions
+
+
+def _when_phrase(event_date: object, today: date) -> str:
+    """'today' / 'tomorrow' / 'in N days' for an event date (calendar days, for readability)."""
+    try:
+        days = (date.fromisoformat(str(event_date)[:10]) - today).days
+    except (TypeError, ValueError):
+        return "soon"
+    if days <= 0:
+        return "today"
+    if days == 1:
+        return "tomorrow"
+    return f"in {days} days"
+
+
+def _event_line_v2(event: dict | None, sessions: int | None, today: date) -> str:
+    """The default card's event line: a ⛔ block warning within 2 sessions, else the next event.
+
+    Speaks in human terms (Law 1 — describes the rule's effect, never '§8'/'armed'/
+    'materiality'). Within 2 sessions the card states that the pre-registered event-filter
+    rule blocks sleeve round trips today; otherwise it names the next event that matters."""
+    if event is None:
+        return "No blocking events on your calendar right now."
+    friendly = _friendly_event(event)
+    if sessions is not None and sessions <= 2:
+        return f"⛔ {friendly} {_when_phrase(event.get('date'), today)} — your rules block sleeve round trips today."
+    try:
+        days = (date.fromisoformat(str(event.get("date"))[:10]) - today).days
+        day_str = f" ({days} days)"
+    except (TypeError, ValueError):
+        day_str = ""
+    return f"Next event that matters: {friendly}, {event.get('date')}{day_str}."
+
+
+def _vix_percentile_today(client, today: date) -> float | None:
+    """The fear gauge (VIX) percentile within its trailing ~1y window, as of today.
+
+    Reuses ``siglab.engine.vix_percentile_asof`` so the /today conditions read and the
+    Signal Lab rule share ONE percentile definition (no drift). None if VIX is unseeded."""
+    rows = (
+        client.table("macro_series").select("date,value")
+        .eq("series_id", "VIXCLS").order("date", desc=True).limit(252).execute().data or []
+    )
+    asc = sorted(
+        ({"date": r.get("date"), "value": _to_float(r.get("value"))} for r in rows),
+        key=lambda r: str(r["date"]),
+    )
+    return vix_percentile_asof(asc, today.isoformat(), 252)
+
+
+def _conditions_line(event_within_2: bool, vix_pct: float | None) -> str:
+    """The top-of-card weather read: STORMY / CALM / NORMAL + a plain reason (Law 1).
+
+    STORMY if a blocking event is within 2 sessions OR the fear gauge is high (≥ 80th
+    pct); CALM if neither event nor elevated fear AND the gauge is low (≤ 40th pct);
+    else NORMAL. Purely descriptive — the card names the weather, never a course of action."""
+    high_fear = vix_pct is not None and vix_pct >= 80
+    low_fear = vix_pct is not None and vix_pct <= 40
+    if event_within_2 or high_fear:
+        bits = []
+        if event_within_2:
+            bits.append("a blocking event is close")
+        if high_fear:
+            bits.append(f"the fear gauge is high (≈{vix_pct:.0f}th percentile of its year)")
+        return f"*Conditions: STORMY* — {'; '.join(bits)}."
+    if not event_within_2 and low_fear:
+        return (
+            f"*Conditions: CALM* — no blocking events near and the fear gauge is low "
+            f"(≈{vix_pct:.0f}th percentile of its year)."
+        )
+    gauge = (
+        f" — fear gauge mid-range (≈{vix_pct:.0f}th percentile of its year)"
+        if vix_pct is not None else ""
+    )
+    return f"*Conditions: NORMAL* — nothing unusual{gauge}."
+
+
+def _render_default_card(client, config: dict[str, Any], today: date) -> str:
+    """The default one-glance card: conditions, sleeve direction, market, young, event, signal."""
+    watchlist = [s for s in (config.get("watchlist") or []) if isinstance(s, str)]
+    primary = _sleeve_symbol(config)
+
+    data: dict[str, tuple[float | None, dict]] = {}
+    for symbol in watchlist:
+        _pdate, close = _latest_close(client, symbol)
+        data[symbol] = (close, _latest_indicators(client, symbol))
+
+    young = [s for s in watchlist if data[s][1].get("sma200") is None]  # no 200-day history yet
+    event = _nearest_arming_event(client, today)
+    sessions = _sessions_until(event.get("date"), today) if event else None
+    event_within_2 = event is not None and sessions is not None and sessions <= 2
+    vix_pct = _vix_percentile_today(client, today)
+
+    lines = [f"*Today* — {today.isoformat()} (UTC)", "", _conditions_line(event_within_2, vix_pct), ""]
+
+    if primary and primary in data:
+        close, ind = data[primary]
+        lines.append(_direction_line(primary, close, ind))
+
+    market_syms = [s for s in watchlist if s != primary and s not in young]
+    dirs = {
+        s: _direction(
+            data[s][0], data[s][1].get("sma50"), data[s][1].get("sma200"),
+            data[s][1].get("macd"), data[s][1].get("macd_signal"),
+        )[0]
+        for s in market_syms
+    }
+    market_line = _market_line(dirs)
+    if market_line:
+        lines.append(market_line)
+
+    for symbol in young:
+        lines.append(_young_line(symbol, data[symbol][1]))
+
+    lines.append("")
+    lines.append(_event_line_v2(event, sessions, today))
+
+    stats, blob = _signal_stats(client)
+    lines.append("")
+    lines.append(render_signal_today(stats) if stats else render_signal_today_pending(blob))
+    return "\n".join(lines)
+
+
+def _render_full_card(client, config: dict[str, Any], today: date) -> str:
+    """The detailed card (`/today full`) — the workings: per-ticker trend+momentum, cap, sleeve."""
     watchlist = [s for s in (config.get("watchlist") or []) if isinstance(s, str)]
 
-    lines = [
-        f"*Today* — {today.isoformat()} (UTC)",
-        "Context, not advice — this card describes state; you decide.",
-        "",
-        "*Watchlist*",
-    ]
+    lines = [f"*Today* — {today.isoformat()} (UTC)", "", "*Watchlist*"]
     if not watchlist:
         lines.append("• (no watchlist configured)")
     for symbol in watchlist:
@@ -551,9 +813,24 @@ def handle_today(message: dict) -> str:
     # Signal Lab (Law 1 Amendment #2): the labelled experimental signal + its record.
     stats, blob = _signal_stats(client)
     lines.append("")
-    lines.append("*Signal Lab* (experiment — shadow only, not advice)")
     lines.append(render_signal_line(stats) if stats else _signal_pending_line(blob))
     return "\n".join(lines)
+
+
+def handle_today(message: dict) -> str:
+    """Render the 'Today' card. Default = the one-glance six-line card; ``/today full`` = detail.
+
+    Both are deterministic DB renders (no LLM, grounding-exempt by construction) and both
+    DESCRIBE state and never advise (Law 1, pinned by tests/test_today_handler.py). The
+    default is the at-a-glance read; ``/today full`` shows the workings (per-ticker
+    trend+momentum, the weekly cap, sleeve registration)."""
+    client = get_client()
+    config = _load_config()
+    today = _utc_today()
+    tokens = (message.get("text") or "").split()[1:]
+    if tokens and tokens[0].lower() == "full":
+        return _render_full_card(client, config, today)
+    return _render_default_card(client, config, today)
 
 
 # --------------------------------------------------------------------------- #

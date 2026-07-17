@@ -5,7 +5,9 @@ triggered (win/loss) days. RETIRED is decided on the fixed first-30 prefix so it
 un-retire; PASS on the first-60 prefix."""
 
 import pytest
+from postgrest.exceptions import APIError
 
+from siglab.job import ledger_table_exists
 from siglab.ledger import compute_stats, derive_status
 from siglab.registry import SIGNAL_V1_DEFAULT, signal_gates
 
@@ -119,3 +121,47 @@ def test_retired_and_pass_labels():
     assert passed["status"] == "PASS"
     assert "promotion is Omar's alone" in passed["evidence_label"]
     assert passed["next_gate"] is None
+
+
+# --------------------------------------------------------------------------- #
+# ledger_table_exists — the pre-migration graceful-skip guard (siglab/job.py)
+# --------------------------------------------------------------------------- #
+class _FakeTable:
+    def __init__(self, exc=None):
+        self._exc = exc
+
+    def select(self, *_a, **_k):
+        return self
+
+    def limit(self, *_a):
+        return self
+
+    def execute(self):
+        if self._exc is not None:
+            raise self._exc
+        return type("R", (), {"data": []})()
+
+
+class _FakeClient:
+    def __init__(self, exc=None):
+        self._exc = exc
+
+    def table(self, _name):
+        return _FakeTable(self._exc)
+
+
+def test_ledger_table_exists_true_when_queryable():
+    assert ledger_table_exists(_FakeClient()) is True
+
+
+def test_ledger_table_exists_false_on_missing_table():
+    # PGRST205 = relation absent (pre-migration) → benign pending state, not a failure.
+    exc = APIError({"message": "Could not find the table", "code": "PGRST205"})
+    assert ledger_table_exists(_FakeClient(exc)) is False
+
+
+def test_ledger_table_exists_reraises_other_api_errors():
+    # Any non-missing-table error must surface (Law 7) — never swallowed as 'absent'.
+    exc = APIError({"message": "permission denied", "code": "42501"})
+    with pytest.raises(APIError):
+        ledger_table_exists(_FakeClient(exc))

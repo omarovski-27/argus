@@ -34,6 +34,31 @@ def render_signal_line(stats: dict) -> str:
     return line
 
 
+def render_signal_today(stats: dict) -> str:
+    """The compact one-glance /today line: today's state + the measured historical frequency.
+
+    Format (Amendment #2): ``🧪 Signal: FAVORABLE — days like today won 11% historically
+    (n=38, shadow -$841.00)``. The winrate/n/P&L are the ledger's triggered-day record
+    (the only scored population); the 🧪 label is mandatory and the line states the record
+    and nothing else (no advice — the hard render test guards it)."""
+    state = stats.get("today_state") or "UNFAVORABLE"
+    winrate = stats.get("winrate")
+    winrate_str = "n/a" if winrate is None else f"{winrate * 100:.0f}%"
+    return (
+        f"{EXPERIMENT_LABEL} Signal: {state} — days like today won {winrate_str} "
+        f"historically (n={stats.get('n_triggered', 0)}, "
+        f"shadow {_money_signed(stats.get('cum_pnl'))})."
+    )
+
+
+def render_signal_today_pending(blob: dict) -> str:
+    """The compact /today line before any ledger record exists (label mandatory, no advice)."""
+    return (
+        f"{EXPERIMENT_LABEL} Signal {blob.get('version', 'v1')}: registered "
+        f"{blob.get('registered_at')} — no track record yet (backfill pending)."
+    )
+
+
 def render_signal_full(stats: dict) -> str:
     """The /signal command — full ledger stats + the registered rule + gate progress."""
     winrate = stats.get("winrate")

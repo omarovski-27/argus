@@ -35,6 +35,12 @@ jobs:
       - run: pip install -r requirements-jobs.txt
       - run: python -m ingestion.tiingo
       - run: python -m ingestion.indicators
+      # Signal Lab nightly (Law 1 Amendment #2): append/backfill the shadow ledger from the
+      # freshly written prices + indicators. Insert-only-missing, so the FIRST run after the
+      # signal_ledger DDL lands backfills the full stored history and later runs append the
+      # one just-closed day. Skips GREEN (no red alert) while the migration is pending, then
+      # fails loud (Law 7) if a mature day's inputs go missing once the table exists.
+      - run: python -m siglab.job --nightly
       # Fail-loud push (Law 7 / §12): a red scheduled run must reach Telegram, not just
       # a GitHub e-mail (the 2026-07-03 failure sat unseen for two days).
       - name: Telegram alert on failure
