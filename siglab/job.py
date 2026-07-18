@@ -189,8 +189,8 @@ def run_nightly(client, run_id: str | None = None) -> dict:
                 f"latest priced day {latest_price_date} has no signal row (inputs missing)",
             )
         write_fetch_log("signal", run_id, "success", int((time.monotonic() - start) * 1000))
-        print(f"[signal] nightly: {written} new row(s); status {stats['status']}; "
-              f"day {stats['n_days']}; record {stats['wins']}-{stats['losses']}.")
+        print(f"[signal] nightly: {written} new state row(s); status {stats['status']}; "
+              f"days logged {stats['n_days']}; today {stats['today_state']} (outcome unknown — no scoring).")
         return stats
     except Exception as exc:  # noqa: BLE001 — surface, log, never swallow (Law 7)
         write_fetch_log("signal", run_id, "failure", int((time.monotonic() - start) * 1000), str(exc))
@@ -199,15 +199,13 @@ def run_nightly(client, run_id: str | None = None) -> dict:
 
 
 def _print_report(rows, warmup, stats) -> None:
-    print(f"[signal] backfill: {len(rows)} computable day(s), {warmup} warmup day(s) skipped.")
-    triggered = stats["n_triggered"]
-    print(f"[signal] FAVORABLE-triggered: {triggered} "
-          f"({stats['wins']} win / {stats['losses']} loss), "
-          f"no_trigger {stats['no_trigger']}, unknown {stats['unknown']}.")
-    wr = stats["winrate"]
-    print(f"[signal] win rate: {'n/a' if wr is None else f'{wr*100:.1f}%'}; "
-          f"cumulative shadow P&L: {stats['cum_pnl']:+,.2f}.")
-    print(f"[signal] derived status: {stats['status']}  ({stats['evidence_label']})")
+    fav = sum(1 for r in rows if r.get("signal_state") == "FAVORABLE")
+    unfav = sum(1 for r in rows if r.get("signal_state") == "UNFAVORABLE")
+    print(f"[signal] backfill: {len(rows)} computable day(s) logged (STATE ONLY), "
+          f"{warmup} warmup day(s) skipped.")
+    print(f"[signal] state: {fav} FAVORABLE / {unfav} UNFAVORABLE; "
+          f"outcome 'unknown' for all — v1 INCONCLUSIVE, no shadow scoring.")
+    print(f"[signal] status: {stats['status']}  ({stats['evidence_label']})")
     print("\n--- /signal render ---")
     print(render_signal_full(stats))
 

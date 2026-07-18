@@ -18,6 +18,34 @@ from __future__ import annotations
 SIGNAL_VERSION = "v1"
 SIGNAL_CONFIG_KEY = "signal_v1"
 
+# --- Finalization (2026-07-18, Omar's authorized terminal amendment) -------------------- #
+# v1 is FINALIZED **INCONCLUSIVE**, not RETIRED: the shadow scorer could not test the rule
+# at daily resolution, so its record measured TSLA's daily range rather than the signal.
+# This is NOT a moved gate (Law 6 forbids that) — it is the honest verdict that the
+# experiment as specified was UNMEASURABLE. The figures below are the read-only backfill's
+# measured facts (Law 2), not the round '97%' first sketched; the real both-band share is
+# 74% and 100% of triggered days had a range wider than the whole bracket window.
+SIGNAL_V1_FINAL_STATUS = "INCONCLUSIVE"
+SIGNAL_V1_STATUS_REASON = (
+    "EOD data cannot score a $1.50 bracket on a ~$400 stock: 100% of triggered days had an "
+    "intraday range wider than the $3 bracket window (median $13.76, ~4.6x the window), and "
+    "74% (28 of 38) hit both the target and stop band from the open — so the outcome is "
+    "intraday-path-dependent and unmeasurable at daily resolution. The shadow record measured "
+    "TSLA's daily range, not the rule."
+)
+SIGNAL_V1_PROMOTION_PATH = (
+    "Forward-only. The signal now logs its daily FAVORABLE/UNFAVORABLE state and inputs (no "
+    "shadow outcome — outcome stays 'unknown', no fabricated win/loss). The real ledger becomes "
+    "the actual journal round-trips once a sleeve exists: the signal's state is then compared "
+    "against real round-trip outcomes at TRUE intraday resolution. Promotion into the strategy "
+    "still requires that live comparison to clear a pre-registered bar AND Omar's explicit "
+    "recorded decision — the code renders evidence, never executes or recommends."
+)
+SIGNAL_V1_FINALIZED_AT = "2026-07-18"
+
+# Statuses that are FINALIZED in the blob (authoritative over the ledger-derived gate verdict).
+FINALIZED_STATUSES = frozenset({"INCONCLUSIVE"})
+
 # The canonical registered blob. ``seed_signal`` writes this verbatim on a fresh config
 # and then refuses to touch it again — after that the STORED row is the source of truth
 # (identical to this by construction). Omar may edit this wording only BEFORE the first
@@ -30,7 +58,13 @@ SIGNAL_V1_DEFAULT: dict = {
         "< 80; else UNFAVORABLE."
     ),
     "registered_at": "2026-07-13",
-    "status": "testing",   # registration state; the LIVE verdict is derived from the ledger
+    # FINALIZED 2026-07-18 (was "testing"): v1 is INCONCLUSIVE — the shadow scorer could not
+    # test the rule at daily resolution (see status_reason). This blob value is authoritative
+    # over the ledger-derived gate verdict; the renders show the 'under test / no verdict' line.
+    "status": SIGNAL_V1_FINAL_STATUS,
+    "status_reason": SIGNAL_V1_STATUS_REASON,
+    "promotion_path": SIGNAL_V1_PROMOTION_PATH,
+    "finalized_at": SIGNAL_V1_FINALIZED_AT,
     "params": {
         "symbol": "TSLA",
         "vix_percentile_max": 80,

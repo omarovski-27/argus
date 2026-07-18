@@ -19,7 +19,7 @@ verdict forever (Law 2).
 
 from __future__ import annotations
 
-from siglab.registry import signal_gates, signal_params
+from siglab.registry import FINALIZED_STATUSES, signal_gates, signal_params
 
 _TRIGGERED = ("win", "loss")
 
@@ -64,6 +64,8 @@ def derive_status(triggered: list[dict], gates: dict, fee_per_round_trip: float)
 
 def _evidence_label(status: str, winrate: float | None) -> str:
     """The mandatory plain-language evidence phrase (no advice; a hard render test guards it)."""
+    if status == "INCONCLUSIVE":
+        return "INCONCLUSIVE — daily data can't score this bracket"
     if status == "RETIRED":
         return "RETIRED — failed its gate"
     if status == "PASS":
@@ -75,7 +77,7 @@ def _evidence_label(status: str, winrate: float | None) -> str:
 
 def _next_gate(status: str, n_triggered: int, gates: dict) -> dict | None:
     """The next unreached gate and how many triggers remain (None once terminal)."""
-    if status in ("RETIRED", "PASS"):
+    if status in ("RETIRED", "PASS") or status in FINALIZED_STATUSES:
         return None
     for key in ("n30", "n60"):
         n = int(gates[key]["n"])
@@ -105,12 +107,20 @@ def compute_stats(rows: list[dict], blob: dict) -> dict:
     winrate = (wins / n_triggered) if n_triggered else None
     cum_pnl = sum(_pnl(r) for r in rows)
     fee = float(params.get("fee_per_round_trip", 2.0))
-    status = derive_status(triggered, gates, fee)
+
+    # A FINALIZED status in the blob (e.g. INCONCLUSIVE) is authoritative and permanent — it
+    # wins over the ledger-derived gate verdict (which would read 'testing' now that no day is
+    # scored). A non-finalized blob ("testing") still derives live from the gates.
+    declared = blob.get("status")
+    status = declared if declared in FINALIZED_STATUSES else derive_status(triggered, gates, fee)
 
     return {
         "version": blob.get("version", "v1"),
         "registered_at": blob.get("registered_at"),
         "rule": blob.get("rule"),
+        "status_reason": blob.get("status_reason"),
+        "promotion_path": blob.get("promotion_path"),
+        "finalized_at": blob.get("finalized_at"),
         "n_days": len(rows),
         "today_state": rows[-1].get("signal_state") if rows else None,
         "today_date": rows[-1].get("date") if rows else None,

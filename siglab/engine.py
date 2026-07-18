@@ -5,23 +5,30 @@ arming-event dates) into ledger rows deterministically — no DB, no network —
 BOTH the retrospective backfill and the live nightly evaluation, and a stored (data →
 ledger) mapping reproduces forever (Law 2). ``job`` is the thin DB wrapper around it.
 
-Warmup vs fail-loud: a day whose rule inputs are not yet computable (SMA50 needs 50
-sessions, MACD needs ~34, the VIX window needs history) is a genuine WARMUP skip — the
-signal literally does not exist yet — and the engine reports the count it skipped. That is
-distinct from the LIVE nightly job's fail-loud path, where a mature day with a missing
-input is an ``unknown`` ledger outcome + a ``signal:inputs_missing`` log (Law 7).
+FORWARD-ONLY STATE LOGGING (v1 finalized INCONCLUSIVE, 2026-07-18): the engine logs each
+computable day's FAVORABLE/UNFAVORABLE state + its inputs, but NO LONGER shadow-scores an
+outcome — ``outcome`` stays ``'unknown'`` and ``shadow_pnl`` NULL. The shadow scorer was
+retired because it could not test the rule at daily resolution: a $1.50 bracket on a ~$400
+stock has both bands touched on ~74% of triggered days, so the record measured TSLA's daily
+range, not the signal (see ``registry.SIGNAL_V1_STATUS_REASON``). The real ledger is now the
+actual journal round-trips once a sleeve exists (``registry.SIGNAL_V1_PROMOTION_PATH``). The
+band scorer (``siglab.shadow``) is kept for reference / a future instrument-scaled signal_v2
+but is no longer wired here — v1 never fabricates a win/loss again.
+
+Warmup: a day whose rule inputs are not yet computable (SMA50 needs 50 sessions, MACD needs
+~34, the VIX window needs history) is a genuine WARMUP skip — the signal literally does not
+exist yet — and the engine reports the count it skipped. The LIVE nightly job's fail-loud
+path still applies: a mature day that yields no row is a ``signal:inputs_missing`` log (L7).
 
 BACKFILL EVENT-FILTER CAVEAT (stated honestly): the event-filter leg reads
 ``calendar_events``, which is forward-looking, so historical macro events not seeded there
 are treated as "clear" in backfill — this can only make a backfilled day MORE likely
-FAVORABLE than live, so the retrospective record is, if anything, generous on that leg.
-Live nightly scoring checks the real forward calendar for day D.
+FAVORABLE than live. Live nightly scoring checks the real forward calendar for day D.
 """
 
 from __future__ import annotations
 
 from siglab.rule import SignalInputs, evaluate_signal
-from siglab.shadow import score_bracket
 
 
 def vix_percentile_asof(
@@ -75,15 +82,15 @@ def build_ledger_rows(
 ) -> tuple[list[dict], int]:
     """(rows, warmup_skipped). ``prices`` = TSLA OHLC ascending; one row per computable day.
 
-    Each row: {date (=D), signal_state, outcome, shadow_pnl, inputs_json}. FAVORABLE days
-    are shadow-scored on day D's OHLC (outcome 'unknown' + None P&L if D OHLC is absent);
-    UNFAVORABLE days log state only (outcome 'no_trigger', P&L 0)."""
+    FORWARD-ONLY (v1 INCONCLUSIVE): each row is {date (=D), signal_state, outcome, shadow_pnl,
+    inputs_json} — ``signal_state`` is the computed FAVORABLE/UNFAVORABLE, and ``outcome`` is
+    always ``'unknown'`` with NULL ``shadow_pnl``. The engine records STATE + INPUTS only; it
+    no longer shadow-scores a win/loss (day-D OHLC is not consulted), because the daily-bar
+    scorer could not measure the rule (see the module docstring). ``inputs_json`` still carries
+    each rule leg's boolean so a stored row explains WHY the day was FAVORABLE/UNFAVORABLE."""
     prices = sorted(prices, key=lambda r: str(r.get("date")))
     vix_asc = sorted(vix_asc, key=lambda r: str(r.get("date")))
     vix_max = params.get("vix_percentile_max", 80)
-    bracket = params.get("bracket", 1.50)
-    shares = params.get("shadow_shares", 17)
-    fee = params.get("fee_per_round_trip", 2.00)
 
     rows: list[dict] = []
     warmup = 0
@@ -93,23 +100,13 @@ def build_ledger_rows(
             warmup += 1
             continue
         verdict = evaluate_signal(inputs, vix_percentile_max=vix_max)
-        state = verdict["state"]
-        d = prices[i]
-        if state == "FAVORABLE":
-            o, h, low = d.get("open"), d.get("high"), d.get("low")
-            if o is None or h is None or low is None:
-                outcome, pnl = "unknown", None
-            else:
-                outcome, pnl = score_bracket(
-                    o, h, low, bracket=bracket, shares=shares, fee_per_round_trip=fee
-                )
-        else:
-            outcome, pnl = "no_trigger", 0.0
         rows.append({
             "date": day,
-            "signal_state": state,
-            "outcome": outcome,
-            "shadow_pnl": pnl,
+            "signal_state": verdict["state"],
+            # Forward-only: NO shadow scoring. Outcome stays 'unknown', P&L NULL — the state
+            # is logged, but v1 never fabricates a win/loss (the measurement was invalid).
+            "outcome": "unknown",
+            "shadow_pnl": None,
             "inputs_json": {
                 "conditions": verdict["conditions"],
                 "close": inputs.close, "sma50": inputs.sma50,

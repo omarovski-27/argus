@@ -45,6 +45,7 @@ from siglab.ledger import compute_stats
 from siglab.registry import load_signal
 from siglab.render import (
     render_signal_full,
+    render_signal_full_pending,
     render_signal_line,
     render_signal_today,
     render_signal_today_pending,
@@ -503,14 +504,6 @@ def _signal_stats(client):
     return (compute_stats(rows, blob) if rows else None), blob
 
 
-def _signal_pending_line(blob: dict) -> str:
-    """The labelled line shown before any ledger record exists (still no advice)."""
-    return (
-        f"🧪 Signal {blob.get('version', 'v1')} (experiment): registered "
-        f"{blob.get('registered_at')}, backfill pending — no record yet."
-    )
-
-
 # --------------------------------------------------------------------------- #
 # /today v2 — the default one-glance card (deterministic, no LLM)
 #
@@ -810,10 +803,10 @@ def _render_full_card(client, config: dict[str, Any], today: date) -> str:
     lines.append(f"*This week:* {len(trips)}/{cap} round trips (weekly cap).")
     lines.append(_sleeve_status_line(config))
 
-    # Signal Lab (Law 1 Amendment #2): the labelled experimental signal + its record.
+    # Signal Lab (Law 1 Amendment #2): the labelled experimental signal line.
     stats, blob = _signal_stats(client)
     lines.append("")
-    lines.append(render_signal_line(stats) if stats else _signal_pending_line(blob))
+    lines.append(render_signal_line(stats) if stats else render_signal_today_pending(blob))
     return "\n".join(lines)
 
 
@@ -845,7 +838,7 @@ def handle_signal(message: dict) -> str:
     client = get_client()
     stats, blob = _signal_stats(client)
     if not stats:
-        return "*Signal Lab*\n\n" + _signal_pending_line(blob)
+        return "*Signal Lab*\n\n" + render_signal_full_pending(blob)
     return render_signal_full(stats)
 
 

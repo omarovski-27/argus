@@ -174,8 +174,9 @@ def test_default_event_block_within_two_sessions(cpi_eve):
 
 def test_default_signal_line_pending_when_no_ledger(cpi_eve):
     text = handle_today({})
-    # No signal_ledger table in the fake → labelled pending line, 🧪 still present.
-    assert "🧪 Signal v1: registered 2026-07-13 — no track record yet (backfill pending)." in text
+    # No signal_ledger rows in the fake → finalized under-test pending line, 🧪 present.
+    assert "🧪 Signal v1 (under test): awaiting first state log." in text
+    assert "No verdict — daily data can't score this bracket; awaiting live round-trips." in text
 
 
 def test_default_drops_boilerplate_and_workings(cpi_eve):
@@ -185,7 +186,7 @@ def test_default_drops_boilerplate_and_workings(cpi_eve):
     assert "*Watchlist*" not in text         # the per-ticker detail is /today full
 
 
-def test_default_signal_line_measured_when_ledger_present(monkeypatch):
+def test_default_signal_line_under_test_when_ledger_present(monkeypatch):
     today = date(2026, 7, 13)
     tables = {
         "config": [
@@ -197,20 +198,21 @@ def test_default_signal_line_measured_when_ledger_present(monkeypatch):
         "macro_series": _vix_rows([18.0, 19.0, 17.0]),
         "calendar_events": [],
         "round_trips": [],
+        # Forward-only ledger: state rows, outcome unknown, NO win/loss fabricated.
         "signal_ledger": [
-            {"signal_version": "v1", "date": "2026-07-10", "signal_state": "FAVORABLE",
-             "outcome": "win", "shadow_pnl": 23.50},
-            {"signal_version": "v1", "date": "2026-07-11", "signal_state": "FAVORABLE",
-             "outcome": "loss", "shadow_pnl": -27.50},
+            {"signal_version": "v1", "date": "2026-07-11", "signal_state": "UNFAVORABLE",
+             "outcome": "unknown", "shadow_pnl": None},
             {"signal_version": "v1", "date": "2026-07-12", "signal_state": "FAVORABLE",
-             "outcome": "win", "shadow_pnl": 23.50},
+             "outcome": "unknown", "shadow_pnl": None},
         ],
     }
     monkeypatch.setattr(handlers, "get_client", lambda: _FakeClient(tables))
     monkeypatch.setattr(handlers, "_utc_today", lambda: today)
     text = handle_today({})
-    # today_state = last row FAVORABLE; 2 win / 1 loss → 67%, n=3, shadow +$19.50.
-    assert "🧪 Signal: FAVORABLE — days like today won 67% historically (n=3, shadow +$19.50)." in text
+    # v1 finalized INCONCLUSIVE → under-test line with today's state (last row), never a W–L.
+    assert "🧪 Signal v1 (under test): FAVORABLE." in text
+    assert "No verdict — daily data can't score this bracket; awaiting live round-trips." in text
+    assert "won" not in text.lower() and "shadow p&l" not in text.lower()
 
 
 def test_default_market_overall_collapses_spy_qqq(monkeypatch):

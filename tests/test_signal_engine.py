@@ -40,7 +40,8 @@ def test_vix_percentile_none_without_history():
 
 
 # --------------------------------------------------------------------------- #
-# build_ledger_rows — warmup, FAVORABLE→scored, UNFAVORABLE→state-only
+# build_ledger_rows — FORWARD-ONLY state logging (v1 INCONCLUSIVE): every row logs
+# signal_state + inputs, outcome ALWAYS 'unknown', shadow_pnl ALWAYS None (no scoring).
 # --------------------------------------------------------------------------- #
 def _fixture():
     prices = [
@@ -60,36 +61,44 @@ def _fixture():
     return prices, indicators, vix
 
 
-def test_warmup_skip_then_favorable_win_then_unfavorable():
+def test_warmup_skip_then_favorable_then_unfavorable_state_only():
     prices, indicators, vix = _fixture()
     rows, warmup = build_ledger_rows(prices, indicators, vix, set(), _P)
 
-    assert warmup == 1  # scoring 03-03 needs D-2 macd_hist (none) → warmup skip
+    assert warmup == 1  # 03-03 needs D-2 macd_hist (none) → warmup skip
     assert [r["date"] for r in rows] == ["2026-03-04", "2026-03-05"]
 
     fav = rows[0]
     assert fav["signal_state"] == "FAVORABLE"
-    assert fav["outcome"] == "win"                 # 03-04 high 203 >= open 200 + 1.50
-    assert fav["shadow_pnl"] == pytest.approx(23.50)
+    # FORWARD-ONLY: state logged, but NO shadow scoring — outcome unknown, P&L None.
+    assert fav["outcome"] == "unknown" and fav["shadow_pnl"] is None
     assert fav["inputs_json"]["conditions"]["close_above_sma50"] is True
 
     unfav = rows[1]
     assert unfav["signal_state"] == "UNFAVORABLE"  # 03-04 macd_hist 1.5 < 03-03's 2.0
-    assert unfav["outcome"] == "no_trigger" and unfav["shadow_pnl"] == 0.0
+    assert unfav["outcome"] == "unknown" and unfav["shadow_pnl"] is None
+
+
+def test_no_row_ever_carries_a_win_or_loss():
+    # The whole point of the finalization: v1 never fabricates a win/loss again.
+    prices, indicators, vix = _fixture()
+    rows, _ = build_ledger_rows(prices, indicators, vix, set(), _P)
+    assert rows and all(r["outcome"] == "unknown" and r["shadow_pnl"] is None for r in rows)
 
 
 def test_event_filter_arming_flips_favorable_to_unfavorable():
     prices, indicators, vix = _fixture()
-    # Arm the filter on the FAVORABLE scored day 03-04 → event not clear → UNFAVORABLE.
+    # Arm the filter on the would-be FAVORABLE day 03-04 → event not clear → UNFAVORABLE.
     rows, _ = build_ledger_rows(prices, indicators, vix, {"2026-03-04"}, _P)
     row = next(r for r in rows if r["date"] == "2026-03-04")
     assert row["signal_state"] == "UNFAVORABLE"
-    assert row["outcome"] == "no_trigger"
+    assert row["outcome"] == "unknown"
 
 
-def test_favorable_day_missing_ohlc_is_unknown():
+def test_state_logs_even_when_ohlc_missing():
+    # Forward-only logging no longer consults day-D OHLC, so a missing high still logs state.
     prices, indicators, vix = _fixture()
-    prices[2] = {**prices[2], "high": None}  # 03-04 favorable but no high → unscored
+    prices[2] = {**prices[2], "high": None}  # 03-04 favorable, no high
     rows, _ = build_ledger_rows(prices, indicators, vix, set(), _P)
     row = next(r for r in rows if r["date"] == "2026-03-04")
     assert row["signal_state"] == "FAVORABLE"

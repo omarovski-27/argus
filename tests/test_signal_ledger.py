@@ -14,6 +14,10 @@ from siglab.registry import SIGNAL_V1_DEFAULT, signal_gates
 _GATES = signal_gates()
 _FEE = SIGNAL_V1_DEFAULT["params"]["fee_per_round_trip"]
 
+# v1's blob is FINALIZED INCONCLUSIVE (authoritative over the gates). The gate + counting
+# machinery is still exercised for a hypothetical scored signal_v2 via a NON-finalized blob.
+_TESTING_BLOB = {**SIGNAL_V1_DEFAULT, "status": "testing"}
+
 
 def _mk(seq: str) -> list[dict]:
     """A date-ascending triggered ledger from a 'w'/'l' string (e.g. 'wwl')."""
@@ -89,7 +93,7 @@ def _ledger_with_context() -> list[dict]:
 
 
 def test_compute_stats_counts_and_labels():
-    stats = compute_stats(_ledger_with_context(), SIGNAL_V1_DEFAULT)
+    stats = compute_stats(_ledger_with_context(), _TESTING_BLOB)
     assert stats["wins"] == 12 and stats["losses"] == 8
     assert stats["n_triggered"] == 20
     assert stats["winrate"] == pytest.approx(0.6)
@@ -102,12 +106,12 @@ def test_compute_stats_counts_and_labels():
 
 
 def test_below_coinflip_label():
-    stats = compute_stats(_mk("w" * 8 + "l" * 12), SIGNAL_V1_DEFAULT)  # 0.4
+    stats = compute_stats(_mk("w" * 8 + "l" * 12), _TESTING_BLOB)  # 0.4
     assert stats["evidence_label"] == "No evidence of edge yet"
 
 
 def test_empty_ledger_is_no_evidence():
-    stats = compute_stats([], SIGNAL_V1_DEFAULT)
+    stats = compute_stats([], _TESTING_BLOB)
     assert stats["n_days"] == 0 and stats["winrate"] is None
     assert stats["status"] == "testing"
     assert stats["evidence_label"] == "No evidence of edge yet"
@@ -115,12 +119,38 @@ def test_empty_ledger_is_no_evidence():
 
 
 def test_retired_and_pass_labels():
-    assert compute_stats(_mk("w" * 16 + "l" * 14), SIGNAL_V1_DEFAULT)["evidence_label"] \
+    assert compute_stats(_mk("w" * 16 + "l" * 14), _TESTING_BLOB)["evidence_label"] \
         == "RETIRED — failed its gate"
-    passed = compute_stats(_mk("w" * 40 + "l" * 20), SIGNAL_V1_DEFAULT)
+    passed = compute_stats(_mk("w" * 40 + "l" * 20), _TESTING_BLOB)
     assert passed["status"] == "PASS"
     assert "promotion is Omar's alone" in passed["evidence_label"]
     assert passed["next_gate"] is None
+
+
+# --------------------------------------------------------------------------- #
+# FINALIZED status — the blob's INCONCLUSIVE verdict is authoritative & permanent
+# --------------------------------------------------------------------------- #
+def test_finalized_status_overrides_gate_verdict():
+    # Even a 'winning' scored ledger cannot un-finalize v1: the blob says INCONCLUSIVE.
+    stats = compute_stats(_mk("w" * 40 + "l" * 20), SIGNAL_V1_DEFAULT)
+    assert stats["status"] == "INCONCLUSIVE"
+    assert stats["evidence_label"] == "INCONCLUSIVE — daily data can't score this bracket"
+    assert stats["next_gate"] is None
+    assert "unmeasurable at daily resolution" in stats["status_reason"]
+    assert "actual journal round-trips" in stats["promotion_path"]
+
+
+def test_finalized_status_holds_for_state_only_ledger():
+    # The real forward-only ledger: state rows, all outcome 'unknown' → still INCONCLUSIVE,
+    # no wins/losses fabricated.
+    rows = [{"date": "2026-07-15", "signal_state": "UNFAVORABLE", "outcome": "unknown",
+             "shadow_pnl": None},
+            {"date": "2026-07-16", "signal_state": "FAVORABLE", "outcome": "unknown",
+             "shadow_pnl": None}]
+    stats = compute_stats(rows, SIGNAL_V1_DEFAULT)
+    assert stats["status"] == "INCONCLUSIVE"
+    assert stats["wins"] == 0 and stats["losses"] == 0 and stats["n_triggered"] == 0
+    assert stats["today_state"] == "FAVORABLE"   # last row by date
 
 
 # --------------------------------------------------------------------------- #
