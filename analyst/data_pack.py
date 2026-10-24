@@ -162,7 +162,11 @@ def _latest_price(symbol: str, client, run_id: str) -> dict:
     try:
         import yfinance as yf
 
-        history = yf.Ticker(symbol).history(period="5d", auto_adjust=False)
+        from shared.yahoo import yahoo_session
+
+        history = yf.Ticker(symbol, session=yahoo_session()).history(
+            period="5d", auto_adjust=False
+        )
         if history is not None and not history.empty:
             last = history.iloc[-1]
             write_fetch_log("analyst:price_yf", run_id, "success", elapsed_ms(start))

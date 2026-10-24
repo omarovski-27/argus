@@ -170,7 +170,7 @@ handled but remains the fiddliest corner of the facts mapper.
 ## Running it
 
 ```bash
-# tests (pure logic; no DB, no network)
+# tests (no DB or external network; transport regression uses localhost)
 python -m pytest -q
 
 # read-only live probes
@@ -184,3 +184,16 @@ python -m analyst.dossier TSLA --print-only  # dossier + all four gates, nothing
 Secrets ride in `.env` locally, GitHub repo secrets in Actions, and Vercel env vars in
 the webhook (see `.env.example`). No credentials, chat IDs, or account values live in
 this repository.
+
+## Yahoo transport security
+
+Both Yahoo data paths use `shared.yahoo.yahoo_session()`. The session requests
+uncompressed responses and disables libcurl content decoding to prevent
+CVE-2026-111497 from reaching the Brotli decoder bundled with `curl_cffi`.
+An unsolicited compressed response stays undecoded and fails JSON parsing;
+existing source-health handling reports that data as unavailable. Requesting
+`Accept-Encoding: identity` alone does not provide this protection.
+
+This is an application mitigation while affected native wheels remain available,
+not a patch to their embedded decoder. Keep the transport regression tests when
+updating `curl_cffi` or `yfinance`.

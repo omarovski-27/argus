@@ -30,6 +30,7 @@ from datetime import datetime, timezone
 from shared.exceptions import FetchError
 from shared.fetch_logger import elapsed_ms, write_fetch_log
 from shared.fetcher_base import fetch_with_retry
+from shared.yahoo import yahoo_session
 
 FINNHUB_RECOMMENDATION_URL = "https://finnhub.io/api/v1/stock/recommendation"
 
@@ -134,7 +135,7 @@ def estimates_block(symbol: str, run_id: str) -> dict:
 
     start = time.monotonic()
     sym = symbol.strip().upper()
-    ticker = yf.Ticker(sym)
+    ticker = yf.Ticker(sym, session=yahoo_session())
     notes: list[str] = []
     block: dict = {"source": "yfinance", "symbol": sym}
 
