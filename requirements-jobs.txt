@@ -6,3 +6,4 @@ pandas
 pandas-ta>=0.4.71b0
 anthropic
 yfinance
+curl_cffi>=0.15.0
